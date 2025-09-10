@@ -51,7 +51,7 @@ def _load_mpc_module():
 
 # ====================== USER PARAMETERS (EDIT HERE) ====================
 # MAVLink
-MAVLINK_URL  = "udp:172.24.32.1:14550"
+MAVLINK_URL  = "udp:127.0.0.1:14550"
 
 # Mode: "l1" (capture only), "mpc" (tracker only), "blend" (L1→MPC with gating+easing)
 LATERAL_MODE = "blend"
