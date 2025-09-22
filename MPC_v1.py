@@ -1,68 +1,166 @@
-# =====================================================================
+"""Versi simulasi Python penuh untuk pipeline MPC.
+
+Script ini menerapkan override ``PYTHON_SIM_CONFIG`` dari :mod:`config_sets`.
+Konfigurasi ini mempertahankan perilaku default seperti animasi dan ekspor
+grafik untuk analisis offline. Jalankan ``python MPC_v1.py`` untuk varian ini.
+Untuk konfigurasi headless/SITL yang menonaktifkan animasi gunakan
+``python MPC_v2.py`` yang memuat ``SITL_CONFIG``.
+"""
 
 from __future__ import annotations
-import os, math, numpy as np
-import pandas as pd
+
+import os
+import math
+from datetime import datetime
+from typing import Any, Dict, Mapping, Tuple
+
 import matplotlib.pyplot as plt
+import numpy as np
+import osqp
+import pandas as pd
+import scipy.sparse as sp
 from matplotlib import animation
 from matplotlib.patches import Polygon
-import scipy.sparse as sp
-import osqp
+
 from dataclasses import dataclass
-from typing import Dict, Tuple, Any
-from datetime import datetime
 
-# ----------------------- USER PARAMETERS ------------------------------
-# Simulation
-Ts          = 0.10          # [s] simulation step
-T_end       = 150.0          # [s] total sim time
-Va_ref      = 21.0          # [m/s] desired airspeed reference (used by controllers)
-tau_mu      = 0.6           # [s] roll (bank) time constant (LOES)
+from config_sets import PYTHON_SIM_CONFIG
 
-# Longitudinal (airspeed) dynamics & throttle PI
-m_aircraft  = 1.2           # [kg] mass
-k_drag      = 0.08          # [N/(m/s)^2] drag coefficient aggregate
-k_thrust    = 9.0           # [N] max thrust, so T = k_thrust * thr
-tau_thr     = 0.30          # [s] throttle first-order time constant
-thr0        = 0.40          # [-] initial throttle
-Kp_thr      = 2.9          # [-] PI throttle Kp on (Va_ref - V)
-Ki_thr      = 0.1          # [-] PI throttle Ki on (Va_ref - V)
+# ----------------------- KONFIGURASI DASAR ----------------------------
+DEFAULT_CONFIG: Dict[str, Any] = {
+    # Simulation
+    "Ts": 0.10,
+    "T_end": 150.0,
+    "Va_ref": 21.0,
+    "tau_mu": 0.6,
+    # Longitudinal (airspeed) dynamics & throttle PI
+    "m_aircraft": 1.2,
+    "k_drag": 0.08,
+    "k_thrust": 9.0,
+    "tau_thr": 0.30,
+    "thr0": 0.40,
+    "Kp_thr": 2.9,
+    "Ki_thr": 0.1,
+    # Wind model
+    "wind_mode": "gust",
+    "wind_mean": (0.0, 2.0),
+    "wind_max": 12.0,
+    "wind_rot_deg_s": 2.0,
+    "gust_amp": 2.5,
+    "gust_T": 17.0,
+    "rw_sigma_deg_s": 15.0,
+    "rw_sigma_mps_s": 0.8,
+    # Loiter path
+    "circle_C": (0.0, 0.0),
+    "circle_R": 90.0,
+    "cw": True,
+    # Initial condition
+    "start_pos": (-120.0, 100.0),
+    "start_heading_type": "to_center",
+    "start_bank": 0.0,
+    # Bank limits & slew
+    "bank_limit_deg": 35.0,
+    "slew_limit_deg_s": 120.0,
+    # L1 parameters
+    "L1_period": 17.0,
+    "L1_damping": 0.75,
+    # LTV-MPC weights (state & terminal)
+    "w_et": 30.0,
+    "w_echi": 4.0,
+    "w_mu": 0.25,
+    "w_u": 10.0,
+    "w_et_T": 20.0,
+    "w_echi_T": 3.0,
+    # LTV-MPC horizon & smoothing
+    "N_horizon": 30,
+    "w_du": 40.0,
+    "w_mu_Term": 4.0,
+    "use_cmd_filter": False,
+    "alpha_cmd": 0.30,
+    # Speed-aware Δu scaling (optional)
+    "use_w_du_scaling": False,
+    "Va_nominal": 21.0,
+    # Hybrid L1 → MPC blend
+    "use_hybrid_l1_mpc": True,
+    "r_err_enter_frac": 0.35,
+    "head_align_deg": 45.0,
+    "hold_enter_steps": 10,
+    "r_err_exit_frac": 0.90,
+    "head_exit_deg": 80.0,
+    "blend_seconds": 1.0,
+    # Plot/animation
+    "make_animation": True,
+    "anim_every_kstep": 2,
+    "plane_size_m": 12.0,
+    "anim_duration_s": 20,
+    "save_gif": True,
+    "save_mp4": False,
+    "show_planes": False,
+    "alpha_circle": 0.50,
+    "alpha_trails": 0.75,
+    "alpha_quiver": 0.80,
+}
 
-# --- Wind model ---
-wind_mode = "gust"   # "constant" | "rotating" | "gust" | "randomwalk" | "custom"
-wind_mean = (0.0, 2.0)   # mean vector for most modes
-wind_max  = 12.0
+CURRENT_CONFIG: Dict[str, Any] = dict(DEFAULT_CONFIG)
+run_tag: str | None = None
+_output_prepared = False
 
-# rotating
-wind_rot_deg_s = 2.0     # deg/s, +CCW
 
-# gust
-gust_amp = 2.5           # m/s amplitude
-gust_T   = 17.0          # s period
+def configure(overrides: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    """Apply configuration overrides and expose them as module globals."""
 
-# randomwalk (deterministic here for reproducibility)
-rw_sigma_deg_s = 15.0
-rw_sigma_mps_s = 0.8
+    global CURRENT_CONFIG, run_tag, _output_prepared
 
-# Loiter path
-circle_C    = (0.0, 0.0)    # center (North, East)
-circle_R    = 90.0          # [m] radius
-cw          = True          # True: clockwise, False: counterclockwise
+    extra = dict(overrides or {})
+    unknown = set(extra) - set(DEFAULT_CONFIG)
+    if unknown:
+        raise KeyError(f"Unknown config keys: {sorted(unknown)}")
 
-# Initial condition
-start_pos           = (-120.0, 100.0)  # [m] (North, East)
-start_heading_type  = "to_center"      # "to_center" | "east" | "north" | angle_rad
-start_bank          = 0.0              # [rad]
+    CURRENT_CONFIG = dict(DEFAULT_CONFIG)
+    CURRENT_CONFIG.update(extra)
 
-# Bank limits & slew
-bank_limit_deg     = 35.0              # [deg]
-slew_limit_deg_s   = 120.0             # [deg/s]
+    if "Va_nominal" not in extra and "Va_ref" in extra:
+        CURRENT_CONFIG["Va_nominal"] = CURRENT_CONFIG["Va_ref"]
 
-# L1 parameters
-L1_period   = 17.0                     # [s]
-L1_damping  = 0.75                     # [-]
+    for key, value in CURRENT_CONFIG.items():
+        globals()[key] = value
 
-# LTV-MPC weights (state & terminal)
+    run_tag = None
+    _output_prepared = False
+    return dict(CURRENT_CONFIG)
+
+
+def get_active_config() -> Dict[str, Any]:
+    """Return a copy of the currently active configuration."""
+
+    return dict(CURRENT_CONFIG)
+
+
+def ensure_output_dir() -> str:
+    """Create the timestamped output directory on demand."""
+
+    global run_tag, _output_prepared
+    if not _output_prepared or not run_tag:
+        run_tag = datetime.now().strftime("run_%Y%m%d-%H%M%S")
+        os.makedirs(run_tag, exist_ok=True)
+        _output_prepared = True
+    return run_tag
+
+
+def savefig_here(name: str) -> None:
+    ensure_output_dir()
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_tag, name), dpi=160)
+
+
+def savepath(name: str) -> str:
+    return os.path.join(ensure_output_dir(), name)
+
+
+def wrap(a: float) -> float:
+    return math.atan2(math.sin(a), math.cos(a))
+
+
 @dataclass
 class MPCWeights:
     w_et: float
@@ -72,59 +170,10 @@ class MPCWeights:
     w_et_T: float
     w_echi_T: float
 
-w_et        = 30.0
-w_echi      = 4.0
-w_mu        = 0.25
-w_u         = 10.0
-w_et_T      = 20.0
-w_echi_T    = 3.0
 
-# LTV-MPC horizon & smoothing
-N_horizon       = 30                   # steps
-w_du            = 40.0                # weight on Δu
-w_mu_Term       = 4.0                 # terminal penalty on (mu_N - mu_ss)^2
-use_cmd_filter  = False               # keep False to assess controller behaviour
-alpha_cmd       = 0.30
+# Apply default configuration on import
+configure(PYTHON_SIM_CONFIG)
 
-# Speed-aware Δu scaling (optional)
-use_w_du_scaling = False              # if True: scale w_du with Va_model^2 / Va_nom^2
-Va_nominal       = Va_ref
-
-# ==== Hybrid L1 → MPC (orange) ====
-use_hybrid_l1_mpc = True
-r_err_enter_frac  = 0.35   # |ρ - R| < 35%R → eligible to enter MPC
-head_align_deg    = 45.0   # |χ - χ_tangent| < 45°
-hold_enter_steps  = 10     # keep above conditions for ~1 s (if Ts=0.1)
-r_err_exit_frac   = 0.90
-head_exit_deg     = 80.0
-blend_seconds     = 1.0
-
-# --- Plot/Animation settings ---
-make_animation     = True               # enable animation
-anim_every_kstep   = 2                 # initial subsampling factor (may be auto-adjusted)
-plane_size_m       = 12.0
-anim_duration_s    = 20
-save_gif           = True
-save_mp4           = False
-show_planes        = False
-alpha_circle       = 0.50
-alpha_trails       = 0.75
-alpha_quiver       = 0.80
-
-# Output folder (timestamped)
-from datetime import datetime
-run_tag = datetime.now().strftime("run_%Y%m%d-%H%M%S")
-os.makedirs(run_tag, exist_ok=True)
-
-def savefig_here(name: str):
-    plt.tight_layout()
-    plt.savefig(os.path.join(run_tag, name), dpi=160)
-
-def savepath(name: str) -> str:
-    return os.path.join(run_tag, name)
-
-def wrap(a: float) -> float:
-    return math.atan2(math.sin(a), math.cos(a))
 
 # ----------------- Geometry / dynamics helpers -----------------------
 class CirclePath:
@@ -886,7 +935,14 @@ def animate_loiter(path: CirclePath, MPClog: Dict[str,np.ndarray], L1log: Dict[s
     plt.close(fig)
 
 # ---------------------- Main run -------------------------------------
-def main():
+def main(config_overrides: Mapping[str, Any] | None = None):
+    overrides = dict(PYTHON_SIM_CONFIG)
+    if config_overrides:
+        overrides.update(config_overrides)
+
+    configure(overrides)
+    output_dir = ensure_output_dir()
+
     path, l1_green, l1_orange, mpc = build_controllers()
     L1log, MPClog, HYBlog, QPlog = simulate(path, l1_green, l1_orange, mpc)
     aux = prepare_metrics_and_save(path, L1log, MPClog)
@@ -901,7 +957,7 @@ def main():
                        duration_s=anim_duration_s,
                        save_gif=save_gif, save_mp4=save_mp4)
 
-    print(f"Artifacts saved in: {run_tag}")
+    print(f"Artifacts saved in: {output_dir}")
     print(" - traj_compare_with_wind.png, et_compare.png, bank_compare.png, et_series_vs_time.png")
     print(" - metrics_compare.csv, metrics_crosstrack.csv, et_series.csv, qp_stats.csv")
     if make_animation:
