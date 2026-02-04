@@ -29,8 +29,8 @@ Kp_thr      = 2.9          # [-] PI throttle Kp on (Va_ref - V)
 Ki_thr      = 0.1          # [-] PI throttle Ki on (Va_ref - V)
 
 # --- Wind model ---
-wind_mode = "gust"   # "constant" | "rotating" | "gust" | "randomwalk" | "custom"
-wind_mean = (0.0, 2.0)   # mean vector for most modes
+wind_mode = "constant"   # "constant" | "rotating" | "gust" | "randomwalk" | "custom"
+wind_mean = (0.0, 0.0)   # mean vector for most modes
 wind_max  = 12.0
 
 # rotating
@@ -91,7 +91,7 @@ use_w_du_scaling = False              # if True: scale w_du with Va_model^2 / Va
 Va_nominal       = Va_ref
 
 # ==== Hybrid L1 → MPC (orange) ====
-use_hybrid_l1_mpc = True
+use_hybrid_l1_mpc = False
 r_err_enter_frac  = 0.35   # |ρ - R| < 35%R → eligible to enter MPC
 head_align_deg    = 45.0   # |χ - χ_tangent| < 45°
 hold_enter_steps  = 10     # keep above conditions for ~1 s (if Ts=0.1)
@@ -113,7 +113,7 @@ alpha_quiver       = 0.80
 
 # Output folder (timestamped)
 from datetime import datetime
-run_tag = datetime.now().strftime("run_%Y%m%d-%H%M%S")
+run_tag = datetime.now().strftime("logs/run_%Y%m%d-%H%M%S")
 os.makedirs(run_tag, exist_ok=True)
 
 def savefig_here(name: str):

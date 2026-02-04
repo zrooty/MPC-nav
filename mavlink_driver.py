@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ArduPlane FBWB lateral driver (RC override CH1) with **all parameters in this file**.
+lateral driver (RC override CH1) with **all parameters in this file**.
 - Choose LATERAL_MODE: "l1" | "mpc" | "blend"
 - L1 and MPC are instantiated using parameters below (no reliance on MPC_15 constants).
 - Path, weights, limits, horizon, wind feed, and shaping are all configured here.
@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 import numpy as np
 from pymavlink import mavutil
+import psutil
+
 
 # ==== MPC module resolution (set path here if needed) ====
 MPC_MODULE_NAME = "MPC_v2"
@@ -51,55 +53,55 @@ def _load_mpc_module():
 
 # ====================== USER PARAMETERS (EDIT HERE) ====================
 # MAVLink
-MAVLINK_URL  = "udp:127.0.0.1:14550"
+MAVLINK_URL  = "udp:172.24.32.1:14550"
 
 # Mode: "l1" (capture only), "mpc" (tracker only), "blend" (L1→MPC with gating+easing)
 LATERAL_MODE = "blend"
 
 # Timing
-Ts               = 0.1     # controller step [s]
+Ts               = 0.05     # controller step [s]
 TX_HZ            = 15.0     # RC override send rate [Hz]
 STALE_TIMEOUT    = 0.7      # state freshness guard [s]
 
 # Path (circle) — used by both L1 & MPC
 LOITER_C   = (0.0, 0.0)     # (N,E) [m]
-LOITER_R   = 300.0          # [m]
-LOITER_CW  = True           # True: clockwise
+LOITER_R   = 180.0          # [m]
+LOITER_CW  = False           # True: clockwise
 
 # L1 settings
 L1_PERIOD   = 17.0          # [s]
-L1_DAMPING  = 0.75          # [-]
+L1_DAMPING  = 0.707          # [-]
 BANK_LIMIT_DEG = 50.0       # [deg] bank limit seen by both L1 & MPC
 
 # MPC model & solver settings
-MPC_TAU_MU          = 0.6    # [s] bank time constant (LOES)
-MPC_HORIZON         = 30     # steps
-MPC_SLEW_DEG_S      = 120.0  # [deg/s] Δu/Δt limit inside MPC
-MPC_USE_GS_FOR_MUss = True   # centripetal bank uses groundspeed if True
-MPC_W_ET            = 120.0   # stage weight on cross-track radius error e_t
-MPC_W_ECHI          = 10.0    # stage weight on heading-to-tangent error e_chi
-MPC_W_MU            = 0.25   # stage weight on actual mu (keep small)
-MPC_W_U             = 10.0    # stage weight on command u
-MPC_W_ET_T          = 20.0   # terminal weights...
-MPC_W_ECHI_T        = 3.0
-MPC_W_DU            = 400.0   # rate penalty on Δu (total variation)
-MPC_W_MU_TERM       = 4.0    # terminal penalty on (mu_N - mu_ss)^2
-MPC_VA_INIT         = 21.0   # [m/s] initial speed used for linearization
+MPC_TAU_MU          = 0.45    # [s] bank time constant (LOES)
+MPC_HORIZON         = 40     # steps
+MPC_SLEW_DEG_S      = 9.0  # [deg/s] Δu/Δt limit inside MPC
+MPC_USE_GS_FOR_MUss = False   # centripetal bank uses groundspeed if True
+MPC_W_ET            = 1.0   # stage weight on cross-track radius error e_t
+MPC_W_ECHI          = 1.0    # stage weight on heading-to-tangent error e_chi
+MPC_W_MU            = 10.0   # stage weight on actual mu (keep small)
+MPC_W_U             = 3.0    # stage weight on command u
+MPC_W_ET_T          = 2.0   # terminal weights...
+MPC_W_ECHI_T        = 1.0
+MPC_W_DU            = 100.0   # rate penalty on Δu (total variation)
+MPC_W_MU_TERM       = 1.0    # terminal penalty on (mu_N - mu_ss)^2
+MPC_VA_INIT         = 22.0   # [m/s] initial speed used for linearization
 MPC_VA_MIN_MAX      = (6.0, 30.0)
-MPC_VA_LP_TAU       = 0.4    # [s] low-pass on measured Va used by MPC
-MPC_USE_W_DU_SCALING= False  # scale w_du with Va^2 / Va_nom^2
-MPC_VA_NOMINAL      = 21.0   # [m/s] for scaling (if enabled)
+MPC_VA_LP_TAU       = 1.0    # [s] low-pass on measured Va used by MPC
+MPC_USE_W_DU_SCALING= True  # scale w_du with Va^2 / Va_nom^2
+MPC_VA_NOMINAL      = 22.0   # [m/s] for scaling (if enabled)
 
 # Command shaping (outside MPC, applied to roll command before RC)
 # SLEW_BANK_DPS    = 80.0      # [deg/s] external slew (driver level)
 MAX_BANK_DEG     = BANK_LIMIT_DEG  # clamp for RC mapping
 
 # Wind usage
-USE_WIND_FEED = False         # feed (WIND) to L1 & MPC if available
+USE_WIND_FEED = True         # feed (WIND) to L1 & MPC if available
 
 # Hybrid gating (only when LATERAL_MODE == "blend")
-BLEND_SECONDS    = 15.0
-R_ERR_ENTER_FRAC = 0.35
+BLEND_SECONDS    = 20.0
+R_ERR_ENTER_FRAC = 0.25
 HEAD_ALIGN_DEG   = 45.0
 HOLD_ENTER_STEPS = 8
 R_ERR_EXIT_FRAC  = 0.90
@@ -112,15 +114,18 @@ ASSIST_RERR_START    = 0.25   # start assist if |rho-R|/R > 0.25
 ASSIST_HEAD_START_DEG= 35.0   # or |echi| > this [deg]
 ASSIST_BOOTSTRAP_STEPS = 20   # force assist for first K steps
 
+L1_BIAS_GAIN = 0.15   # 0.05–0.2 aman
+
+
 # --- Zig-Zag Killer: MPC feedforward warm-start ---
 FF_ENABLE        = True      # aktif/nonaktifkan
-FF_ALPHA         = 0.60      # porsi feedforward ke u_prev_warm (0..1) 0.60
+FF_ALPHA         = 0.25      # porsi feedforward ke u_prev_warm (0..1) 0.60
 FF_R_BIAS        = 0.25      # bias radial untuk dorong kembali ke R 0.25
-FF_HYST_DEG      = 8.0       # histeresis tanda saat |eχ| kecil (deg) 8
+FF_HYST_DEG      = 7.0       # histeresis tanda saat |eχ| kecil (deg) 8
 
 # opsional: slew adaptif (lebih ketat saat sudah dekat tangent)
-SLEW_NEAR_ECHI_DEG = 12.0    # ambang |eχ| untuk ketatkan slew
-SLEW_BANK_DPS_NEAR = 40.0    # dps saat |eχ| < ambang
+SLEW_NEAR_ECHI_DEG = 5.0    # ambang |eχ| untuk ketatkan slew
+SLEW_BANK_DPS_NEAR = 5.0    # dps saat |eχ| < ambang
 
 
 # RC mapping
@@ -129,7 +134,7 @@ PWM_MIN  = 1000
 PWM_MAX  = 2000
 
 # Logging
-RUN_TAG = _dt.datetime.now().strftime("logs_run_%Y%m%d-%H%M%S")
+RUN_TAG = _dt.datetime.now().strftime("logs/logs_run_%Y%m%d-%H%M%S")
 CSV_PATH = f"{RUN_TAG}/mavlink_driver_allparams_{RUN_TAG}.csv"
 
 # ======================= Helper functions ============================
@@ -226,11 +231,18 @@ class Shared:
         self.qp_status=""; self.qp_iter=0; self.qp_fallback=False
         self.rho=float('nan'); self.rerr=float('nan'); self.echi_deg=float('nan')
 
+        self.exec_time_ctl = 0.0
+        self.jitter_ctl = 0.0
+        self.cpu_percent = 0.0
+        self.mav_rx_latency = 0.0
+
+
 # ======================= Threads ======================================
 def state_reader(m: mavutil.mavfile, S: Shared):
     t0 = time.monotonic(); cnt = 0
     psi_lp = 0.0; psi_init = False; psi_ts = None
     while not S.stop.is_set():
+        recv_t = time.time()
         msg = m.recv_match(blocking=True, timeout=0.3)
         if msg is None: continue
         cnt += 1; tnow = time.monotonic(); tname = msg.get_type()
@@ -284,6 +296,12 @@ def state_reader(m: mavutil.mavfile, S: Shared):
         if (time.monotonic()-t0)>=1.0:
             S.hz_rx = cnt / (time.monotonic()-t0); t0=time.monotonic(); cnt=0
 
+        if hasattr(msg, "_timestamp"):
+            S.mav_rx_latency = recv_t - msg._timestamp 
+        else:
+            S.mav_rx_latency = 0.0
+
+
 def ctl_worker(m: mavutil.mavfile, S: Shared):
     MPC = _load_mpc_module()
 
@@ -311,25 +329,70 @@ def ctl_worker(m: mavutil.mavfile, S: Shared):
     blend_rate = Ts / max(Ts, float(BLEND_SECONDS))
     k_step=0
 
+    # di bagian atas ctl_worker sebelum while:
+    wn_est = 0.0
+    we_est = 0.0
+    alpha_w = 0.12   # filter angin (0.05–0.2 aman)
+
+    last_exec = None
+    last_loop_t = time.monotonic()
+
     while not S.stop.is_set():
         next_t += Ts; time.sleep(max(0.0, next_t-time.monotonic())); cnt+=1; k_step+=1
         with S.state_lock: st = NavState(**vars(S.state))
+
+        t_exec_start = time.perf_counter()
+
+        now = time.monotonic()
+        dt = now - last_loop_t
+        last_loop_t = now
+
+        S.jitter_ctl = dt - Ts
+
+
+        # --- WIND ESTIMATOR: instantaneous measurement ---
+        # Ground velocity (NE)
+        vgN = st.vN
+        vgE = st.vE
+
+        # Airspeed vector (NE)
+        Va = max(0.1, st.Va)
+        psi = st.psi
+        vaN = Va * math.cos(psi)
+        vaE = Va * math.sin(psi)
+
+        # Instant wind estimate
+        windN_inst = vgN - vaN
+        windE_inst = vgE - vaE
+
+        # LPF (low-pass)
+        wn_est = (1 - alpha_w)*wn_est + alpha_w*windN_inst
+        we_est = (1 - alpha_w)*we_est + alpha_w*windE_inst
+
+        # Final wind_NE (dipakai MPC)
+        wind_NE = (wn_est, we_est)
+
         if (time.monotonic()-st.ts) > STALE_TIMEOUT: continue
 
-        if USE_WIND_FEED and isinstance(st.wind_spd,float) and st.wind_spd==st.wind_spd:
-            wind_NE = (st.wind_spd*math.cos(st.wind_dir_rad), st.wind_spd*math.sin(st.wind_dir_rad))
-        else:
-            wind_NE = (0.0, 0.0)
+        # if USE_WIND_FEED and isinstance(st.wind_spd,float) and st.wind_spd==st.wind_spd:
+        #     wind_NE = (st.wind_spd*math.cos(st.wind_dir_rad), st.wind_spd*math.sin(st.wind_dir_rad))
+        # else:
+        #     wind_NE = (0.0, 0.0)
 
         Vg = st.Vg if st.Vg>0.05 else math.hypot(st.vN,st.vE)
 
         # --- ORBIT METRICS lebih dulu (untuk FF & logging) ---
         rho, rerr, _, echi = orbit_metrics(st.N, st.E, st.psi, path.C, path.R, ccw=(not path.cw))
+
+        # --- soft floor untuk radial error (hindari rerr = 0) ---
+        RERR_MIN = 0.5  # meter (atur sesuai kebutuhan)
+        rerr_eff = math.sqrt(rerr*rerr + RERR_MIN*RERR_MIN)
+
         S.rho = rho; S.rerr = rerr; S.echi_deg = math.degrees(echi)
 
         # --- WARM-START untuk MPC: campur u_prev dengan feedforward bank orbit ---
         if FF_ENABLE:
-            mu_ff, new_sign = mu_ff_circle(Vg, path.R, ccw=(not path.cw), rerr=rerr, echi=echi, prev_sign=S.mu_ff_sign)
+            mu_ff, new_sign = mu_ff_circle(Vg, path.R, ccw=(not path.cw), rerr=rerr_eff, echi=echi, prev_sign=S.mu_ff_sign)
             mu_ff = float(np.clip(mu_ff, -math.radians(MAX_BANK_DEG), math.radians(MAX_BANK_DEG)))
             S.mu_ff_sign = new_sign
             u_prev_warm = (1.0 - FF_ALPHA)*u_prev + FF_ALPHA*mu_ff
@@ -391,12 +454,19 @@ def ctl_worker(m: mavutil.mavfile, S: Shared):
 
         # langsung pakai hasil mixing (limit sudah dijaga QP & L1)
         mu_cmd = float(mu_raw)
+
+        # # L1 sebagai bias / feedforward ke MPC
+        # mu_cmd = uMPC + L1_BIAS_GAIN * (uL1 - uMPC)
         u_prev = mu_cmd
 
         with S.cmd_lock: S.cmd_roll = mu_cmd
 
         if (time.monotonic()-t0)>=1.0:
             S.hz_ctl = cnt / (time.monotonic()-t0); t0=time.monotonic(); cnt=0
+
+        t_exec_end = time.perf_counter()
+        exec_time = t_exec_end - t_exec_start
+        S.exec_time_ctl = exec_time
 
 def att_sender(m: mavutil.mavfile, S: Shared, hz: float=TX_HZ):
     period = 1.0 / max(1e-3, hz)
@@ -414,12 +484,13 @@ def att_sender(m: mavutil.mavfile, S: Shared, hz: float=TX_HZ):
         pwm = roll_deg_to_pwm_linear(math.degrees(roll_cmd))       
         m.mav.rc_channels_override_send(
             m.target_system, m.target_component,
-            pwm, 1500, 1500, 0, 0, 0, 0, 0     
+            pwm, 1500, 1550, 0, 0, 0, 0, 0     
         )
         if (time.monotonic()-t0)>=1.0:
             S.hz_tx = cnt / (time.monotonic()-t0); t0=time.monotonic(); cnt=0
 
 def logger_thread(S: Shared, csv_path: str=CSV_PATH):
+    proc = psutil.Process(os.getpid())
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     fields = [
         "t","mode_fc","lat_mode","hyb_phase","hyb_blend",
@@ -429,7 +500,8 @@ def logger_thread(S: Shared, csv_path: str=CSV_PATH):
         "cog_deg","alt","vz","thr",
         "rho","rerr","echi_deg",
         "cmd_roll_deg","uL1_deg","uMPC_deg",
-        "qp_status","qp_iter","qp_fallback"
+        "qp_status","qp_iter","qp_fallback",
+        "exec_time_ms","jitter_ms","cpu_percent","mav_rx_latency_ms",
     ]
     with open(csv_path,"w",newline="") as f:
         w = csv.writer(f); w.writerow(fields)
@@ -437,6 +509,11 @@ def logger_thread(S: Shared, csv_path: str=CSV_PATH):
             time.sleep(0.05)
             with S.state_lock: st = NavState(**vars(S.state))
             with S.cmd_lock: cmd_roll = float(S.cmd_roll)
+
+            cpu = proc.cpu_percent(interval=None)
+            S.cpu_percent = cpu
+
+
             row = [
                 f"{time.monotonic()-BOOT_T0:.3f}", st.mode, S.lat_mode, S.hybrid_phase, f"{S.blend:.3f}",
                 f"{S.hz_rx:.1f}", f"{S.hz_ctl:.1f}", f"{S.hz_tx:.1f}",
@@ -445,7 +522,8 @@ def logger_thread(S: Shared, csv_path: str=CSV_PATH):
                 f"{st.cog_deg if st.cog_deg is not None else ''}", f"{st.alt:.1f}", f"{st.vz:.2f}", f"{st.throttle:.2f}",
                 f"{S.rho:.2f}", f"{S.rerr:.2f}", f"{S.echi_deg:.1f}",
                 f"{math.degrees(cmd_roll):.2f}", f"{math.degrees(S.uL1_last):.2f}", f"{math.degrees(S.uMPC_last):.2f}",
-                S.qp_status, S.qp_iter, S.qp_fallback
+                S.qp_status, S.qp_iter, S.qp_fallback,
+                f"{S.exec_time_ctl*1000:.2f}", f"{S.jitter_ctl*1000:.2f}", f"{cpu:.1f}", f"{S.mav_rx_latency*1000:.2f}",
             ]
             w.writerow(row)
 
@@ -473,7 +551,9 @@ def main():
                   f"psi={math.degrees(st.psi):6.1f}° Va={st.Va:5.1f} Vg={st.Vg:5.1f} | "
                   f"rerr={S.rerr:.1f} echi={S.echi_deg:+5.1f}° | "
                   f"roll_cmd={math.degrees(u):+5.1f}° | "
-                  f"qp:{S.qp_status} iters={S.qp_iter} fb={S.qp_fallback}")
+                  f"qp:{S.qp_status} iters={S.qp_iter} fb={S.qp_fallback} |"
+                  f"exec_time={S.exec_time_ctl*1000:.2f}ms jitter={S.jitter_ctl*1000:.2f}ms proc_cpu={S.cpu_percent:.1f}% mav_rx_latency={S.mav_rx_latency*1000:.2f}ms"
+                )
     except KeyboardInterrupt:
         try: set_mode(m, "RTL")
         except Exception: pass
