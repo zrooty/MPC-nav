@@ -53,7 +53,9 @@ def _load_mpc_module():
 
 # ====================== USER PARAMETERS (EDIT HERE) ====================
 # MAVLink
-MAVLINK_URL  = "udp:172.24.32.1:14550"
+MAVLINK_URL  = "udp:0.0.0.0:14580"
+# Autopilot type: "ardupilot" | "px4"
+AUTOPILOT_TYPE = "px4"
 
 # Mode: "l1" (capture only), "mpc" (tracker only), "blend" (L1→MPC with gating+easing)
 LATERAL_MODE = "blend"
@@ -143,6 +145,17 @@ def _wrap(a: float) -> float: return math.atan2(math.sin(a), math.cos(a))
 def _smoothstep(x: float) -> float:
     x = max(0.0, min(1.0, x)); return x*x*(3.0 - 2.0*x)
 
+def euler_to_quaternion(roll, pitch, yaw):
+    cr = math.cos(roll * 0.5); sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5); sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5); sy = math.sin(yaw * 0.5)
+    return [
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy
+    ]
+
 def orbit_metrics(n, e, chi, C, R, ccw=True):
     r = np.array([n, e]) - np.asarray(C, float)
     rho = float(np.linalg.norm(r)) + 1e-9
@@ -180,14 +193,39 @@ def roll_deg_to_pwm_linear(roll_deg: float) -> int:
     return min(PWM_MAX, max(PWM_MIN, pwm))
 
 def connect_mavlink(url: str) -> mavutil.mavfile:
-    m = mavutil.mavlink_connection(url, autoreconnect=True, dialect="ardupilotmega")
+    dialect = "ardupilotmega" if AUTOPILOT_TYPE == "ardupilot" else "common"
+    m = mavutil.mavlink_connection(url, autoreconnect=True, dialect=dialect)
     m.wait_heartbeat(timeout=30)
     print(f"[MAV] Heartbeat ok (sys={m.target_system} comp={m.target_component})")
     return m
 
 _PLANE_MODES = {0:"MANUAL",1:"CIRCLE",2:"STABILIZE",5:"FBWA",6:"FBWB",7:"CRUISE",10:"AUTO",11:"RTL",12:"LOITER",15:"GUIDED"}
 def decode_plane_mode(custom_mode: int) -> str: return _PLANE_MODES.get(int(custom_mode), f"MODE_{custom_mode}")
+
+_PX4_MAIN_MODES = {1:"MANUAL", 2:"ALTCTL", 3:"POSCTL", 4:"AUTO", 5:"ACRO", 6:"OFFBOARD", 7:"STABILIZED", 8:"RATTITUDE"}
+_PX4_SUB_MODES = {1:"READY", 2:"TAKEOFF", 3:"LOITER", 4:"MISSION", 5:"RTL", 6:"LAND"}
+
+def decode_px4_mode(custom_mode: int) -> str:
+    main_mode = (custom_mode >> 16) & 0xFF
+    sub_mode  = (custom_mode >> 24) & 0xFF
+    m_name = _PX4_MAIN_MODES.get(main_mode, f"MAIN_{main_mode}")
+    if main_mode == 4: # AUTO
+        s_name = _PX4_SUB_MODES.get(sub_mode, f"SUB_{sub_mode}")
+        return f"AUTO_{s_name}"
+    return m_name
+
 def set_mode(m: mavutil.mavfile, name: str) -> None:
+    if AUTOPILOT_TYPE == "px4":
+        if name.upper() == "OFFBOARD":
+            # PX4 OFFBOARD: main_mode=6, sub_mode=0
+            m.mav.command_long_send(m.target_system, m.target_component,
+                                    mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                                    6, 0, 0, 0, 0, 0)
+        else:
+            print(f"[MAV] PX4 set_mode '{name}' not specifically implemented, skipping.")
+        return
+
     try: m.set_mode_apm(name)
     except Exception:
         m.mav.command_long_send(m.target_system, m.target_component,
@@ -249,7 +287,11 @@ def state_reader(m: mavutil.mavfile, S: Shared):
         with S.state_lock:
             st = S.state
             if tname=="HEARTBEAT":
-                try: st.mode = decode_plane_mode(msg.custom_mode)
+                try:
+                    if AUTOPILOT_TYPE == "px4":
+                        st.mode = decode_px4_mode(msg.custom_mode)
+                    else:
+                        st.mode = decode_plane_mode(msg.custom_mode)
                 except Exception: pass
                 st.ts = tnow
             elif tname=="LOCAL_POSITION_NED":
@@ -472,7 +514,10 @@ def att_sender(m: mavutil.mavfile, S: Shared, hz: float=TX_HZ):
     period = 1.0 / max(1e-3, hz)
     next_t=time.monotonic(); t0=time.monotonic(); cnt=0
     try:
-        set_mode(m, "FBWB")
+        if AUTOPILOT_TYPE == "px4":
+            set_mode(m, "OFFBOARD")
+        else:
+            set_mode(m, "FBWB")
     except Exception:
         pass
     while not S.stop.is_set():
@@ -480,12 +525,26 @@ def att_sender(m: mavutil.mavfile, S: Shared, hz: float=TX_HZ):
         with S.cmd_lock: roll_cmd = float(S.cmd_roll)
         with S.state_lock: st = NavState(**vars(S.state))
         if (time.monotonic()-st.ts) > STALE_TIMEOUT: continue
-        # mapping linear dari BANK_LIMIT_DEG → PWM (tanpa shaping tambahan)
-        pwm = roll_deg_to_pwm_linear(math.degrees(roll_cmd))       
-        m.mav.rc_channels_override_send(
-            m.target_system, m.target_component,
-            pwm, 1500, 1550, 0, 0, 0, 0, 0     
-        )
+
+        if AUTOPILOT_TYPE == "px4":
+            # PX4 OFFBOARD: Use SET_ATTITUDE_TARGET
+            q = euler_to_quaternion(roll_cmd, st.pitch, st.yaw)
+            # type_mask=7: ignore body rates, use quaternion + thrust
+            m.mav.set_attitude_target_send(
+                int((time.monotonic()-BOOT_T0)*1000),
+                m.target_system, m.target_component,
+                7,
+                q,
+                0, 0, 0,
+                st.throttle if st.throttle > 0.01 else 0.5 # fallback thrust 50%
+            )
+        else:
+            # ArduPilot: mapping linear dari BANK_LIMIT_DEG → PWM
+            pwm = roll_deg_to_pwm_linear(math.degrees(roll_cmd))
+            m.mav.rc_channels_override_send(
+                m.target_system, m.target_component,
+                pwm, 1500, 1550, 0, 0, 0, 0, 0
+            )
         if (time.monotonic()-t0)>=1.0:
             S.hz_tx = cnt / (time.monotonic()-t0); t0=time.monotonic(); cnt=0
 
