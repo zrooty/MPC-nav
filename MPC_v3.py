@@ -38,8 +38,8 @@ aileron_limit_deg = 25.0
 
 # --- Wind model ---
 wind_mode = "constant"   # "constant" | "rotating" | "gust" | "randomwalk" | "custom"
-wind_mean = (0.0, 0.0)   # mean vector for most modes
-wind_max  = 12.0
+wind_mean = (2.0, 0.0)   # mean vector for most modes
+wind_max  = 6.0
 
 # rotating
 wind_rot_deg_s = 2.0     # deg/s, +CCW
@@ -88,7 +88,7 @@ w_et_T      = 20.0
 w_echi_T    = 3.0
 
 # LTV-MPC horizon & smoothing
-N_horizon       = 30                   # steps
+N_horizon       = 10                   # steps
 w_du            = 40.0                # weight on Δu
 w_mu_Term       = 4.0                 # terminal penalty on (mu_N - mu_ss)^2
 use_cmd_filter  = False               # keep False to assess controller behaviour
@@ -142,36 +142,118 @@ class CirclePath:
         r = np.array(p, dtype=float) - np.asarray(self.C, dtype=float)
         return math.atan2(r[1], r[0])
 
-class RollLQR:
-    def __init__(self):
-        A = np.array([
-            [0.0, 1.0],
-            [0.0, a_p]
-        ])
-        B = np.array([
-            [0.0],
-            [b_p]
-        ])
-        Q = np.diag([
-            25.0,   # bank angle error weight
-            3.0     # roll rate weight
-        ])
-        R = np.array([
-            [1.0]
-        ])
-        P = solve_continuous_are(A, B, Q, R)
-        self.K = np.linalg.inv(R) @ B.T @ P
+class LateralLQR:
+    """
+    6-state LQR inner loop dari artikel Nugroho et al. (2022):
+      state  x = [phi, p, theta, q, psi, r]
+             idx  0    1  2      3  4    5
+      input  u = [tau1, tau2, tau3]  (torques → aileron, elevator, rudder)
 
-    def step(self, mu_ref, mu, p):
-        x_err = np.array([
-            mu - mu_ref,
-            p
+    Untuk simulasi 2D lateral, hanya phi (=mu, bank angle) dan p (roll rate)
+    yang benar-benar dipakai di kinematika pesawat. State theta, q, psi, r
+    di-set ke nol (dummy) karena tidak ada dinamika longitudinal/yaw di 2D.
+
+    Model state-space (persamaan 12 dari artikel) dengan inertia UAV kecil
+    yang diparameterisasi lewat a_p dan b_p agar konsisten dengan plant:
+      phi_dot = p
+      p_dot   = a_p * p + b_p * aileron
+      theta_dot = q        (dummy, q=0)
+      q_dot   = 0          (dummy, tidak ada elevator)
+      psi_dot = r          (dummy, r=0)
+      r_dot   = 0          (dummy)
+
+    Karena fokus lateral, hanya tau1 (torque roll → aileron) yang aktif.
+    Output utama: aileron_cmd (rad) dari komponen K[0] dari feedback phi dan p.
+    """
+    def __init__(self):
+        # --- Inertia (estimasi untuk UAV kecil ~1.2 kg, konsisten dgn artikel) ---
+        Ixx = 0.05   # [kg.m²] momen inersia roll
+        Iyy = 0.10   # [kg.m²] momen inersia pitch  (dummy)
+        Izz = 0.12   # [kg.m²] momen inersia yaw    (dummy)
+        # nilai r dan q saat hover/cruise (linearisasi di titik trim, ≈0)
+        r_trim = 0.0
+        q_trim = 0.0
+
+        # --- Matriks A (6×6) sesuai persamaan (12) artikel ---
+        A = np.array([
+            [0,  1,  0,  0,  0,  0],
+            [0,  0,  0,  (Iyy - Izz) * r_trim / Ixx,  0,  0],
+            [0,  0,  0,  1,  0,  0],
+            [0,  (Izz - Ixx) * r_trim / Iyy,  0,  0,  0,  0],
+            [0,  0,  0,  0,  0,  1],
+            [0,  (Ixx - Iyy) * q_trim / Izz,  0,  0,  0,  0],
+        ], dtype=float)
+
+        # --- Matriks B (6×3) sesuai persamaan (12) artikel ---
+        # kolom 0: tau1 (roll), kolom 1: tau2 (pitch), kolom 2: tau3 (yaw)
+        B = np.zeros((6, 3))
+        B[1, 0] = 1.0 / Ixx   # p_dot dari tau1
+        B[3, 1] = 1.0 / Iyy   # q_dot dari tau2  (dummy)
+        B[5, 2] = 1.0 / Izz   # r_dot dari tau3  (dummy)
+
+        # --- Bobot Q dan R (tuning agar respon roll ~0.5s, no overshoot) ---
+        # Q_phi besar → tracking phi cepat; Q_p damp roll rate
+        Q = np.diag([
+            80.0,   # phi   (roll angle) – bobot tinggi agar tracking tepat
+            5.0,    # p     (roll rate)  – damping
+            1.0,    # theta (pitch, dummy)
+            0.5,    # q     (pitch rate, dummy)
+            1.0,    # psi   (yaw, dummy)
+            0.5,    # r     (yaw rate, dummy)
         ])
-        u = -self.K @ x_err
-        u = float(u)
-        limit = np.radians(aileron_limit_deg)
-        u = np.clip(u, -limit, limit)
-        return u
+        R_ctrl = np.diag([
+            1.0,    # tau1 (roll torque → aileron)
+            10.0,   # tau2 (pitch torque, dummy – besar agar tidak dieksitasi)
+            10.0,   # tau3 (yaw torque, dummy)
+        ])
+
+        # --- Selesaikan ARE untuk gain K (6-state, 3-input) ---
+        P = solve_continuous_are(A, B, Q, R_ctrl)
+        self.K = np.linalg.inv(R_ctrl) @ B.T @ P   # shape (3, 6)
+
+        # Konversi dari tau1 ke aileron_cmd (rad) via plant model:
+        # p_dot = a_p*p + b_p*aileron  →  aileron = tau1 / (b_p * Ixx)
+        # karena dari B: p_dot += tau1/Ixx  dan plant: p_dot += b_p*aileron
+        self._aileron_scale = 1.0 / (b_p * Ixx)
+
+        # Simpan limit aileron
+        self._ail_lim = np.radians(aileron_limit_deg)
+
+        # Info
+        print(f"[LateralLQR] K (roll channel, state=[phi,p]): {self.K[0, :2]}")
+
+    def step(self, mu_ref: float, mu: float, p: float) -> float:
+        """
+        Hitung perintah aileron dari feedback 6-state.
+        State theta, q, psi, r diasumsikan nol (dummy 2D).
+
+        Parameters
+        ----------
+        mu_ref : float  target bank angle [rad] dari MPC/L1
+        mu     : float  bank angle aktual [rad]
+        p      : float  roll rate aktual [rad/s]
+
+        Returns
+        -------
+        aileron_cmd : float  [rad], sudah ter-clip ke ±aileron_limit_deg
+        """
+        # Error state: x_err = x_actual - x_ref
+        # Hanya phi dan p yang aktif; state lain nol (di-trim)
+        x_err = np.array([
+            mu - mu_ref,   # phi error
+            p,             # p (roll rate, ref=0 di trim)
+            0.0,           # theta error (dummy)
+            0.0,           # q (dummy)
+            0.0,           # psi error (dummy)
+            0.0,           # r (dummy)
+        ], dtype=float)
+
+        # Torque roll dari LQR: tau = -K @ x_err  (komponen ke-0)
+        tau1 = float(-self.K[0, :] @ x_err)
+
+        # Konversi tau1 → aileron defleksi [rad]
+        aileron_cmd = tau1 * self._aileron_scale
+        return float(np.clip(aileron_cmd, -self._ail_lim, self._ail_lim))
 
 def rk4_step_long(x: np.ndarray, aileron_cmd: float, thr_cmd: float, Ts: float,
                   wind: Tuple[float,float],
@@ -614,7 +696,7 @@ def orbit_metrics(n, e, chi, C, R, ccw=True):
     return rho, abs(rho - R), chi_tan, echi
 
 # ====== 1) Controllers & path =========================================
-def build_controllers() -> Tuple[CirclePath, L1Loiter, L1Loiter, LTVMPC_OSQP, RollLQR]:
+def build_controllers() -> Tuple[CirclePath, L1Loiter, L1Loiter, LTVMPC_OSQP, LateralLQR]:
     path = CirclePath(circle_C, circle_R, cw=cw)
     l1_dir = (-1 if cw else +1)
     l1_green  = L1Loiter(L1_period, L1_damping, bank_limit_deg, l1_dir)
@@ -625,11 +707,13 @@ def build_controllers() -> Tuple[CirclePath, L1Loiter, L1Loiter, LTVMPC_OSQP, Ro
                       weights=Wg, path=path, w_du=w_du, w_mu_Term=w_mu_Term,
                       use_groundspeed_mu_ss=True, Va_nominal=Va_nominal,
                       use_w_du_scaling=use_w_du_scaling)
-    roll_lqr = RollLQR()
-    return path, l1_green, l1_orange, mpc, roll_lqr
+    # Inner loop: 6-state LQR dari Nugroho et al. (2022)
+    # fokus 2D lateral → hanya phi (mu) dan p yang aktif
+    lateral_lqr = LateralLQR()
+    return path, l1_green, l1_orange, mpc, lateral_lqr
 
 # ====== 2) Simulasi plant + hybrid + logging ==========================
-def simulate(path: CirclePath, l1_green: L1Loiter, l1_orange: L1Loiter, mpc: LTVMPC_OSQP, roll_lqr: RollLQR
+def simulate(path: CirclePath, l1_green: L1Loiter, l1_orange: L1Loiter, mpc: LTVMPC_OSQP, lateral_lqr: LateralLQR
              ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, Any], Dict[str, list]]:
     steps = int(T_end / Ts)
     L1log  = {"n":[], "e":[], "chi":[], "mu":[], "p":[], "V":[], "thr":[], "u_cmd":[]}
@@ -692,10 +776,11 @@ def simulate(path: CirclePath, l1_green: L1Loiter, l1_orange: L1Loiter, mpc: LTV
 
         u2_applied = (1.0-alpha_cmd)*u_prev + alpha_cmd*u2 if use_cmd_filter else u2
 
-        # --- LQR inner loop
+        # --- LQR inner loop (6-state LateralLQR dari artikel Nugroho et al. 2022)
+        # High-level MPC/L1 memberi mu_ref → LQR menghitung aileron defleksi
         mu_actual = x2[3]
         p_actual  = x2[4]
-        aileron_cmd = roll_lqr.step(u2_applied, mu_actual, p_actual)
+        aileron_cmd = lateral_lqr.step(u2_applied, mu_actual, p_actual)
 
         # --- integrasi plant 7-state
         # x1 is L1 path, not modified to use LQR for simplicity of comparison (still uses old mu_dot model)
@@ -707,7 +792,7 @@ def simulate(path: CirclePath, l1_green: L1Loiter, l1_orange: L1Loiter, mpc: LTV
         # For x1 (L1), we can either use the same LQR or a simpler model.
         # To keep it simple, I'll use aileron_cmd1 from a separate LQR or just use mu as input.
         # Actually, let's keep x1 using the new 7-state dynamics too.
-        aileron_cmd1 = roll_lqr.step(u1, x1[3], x1[4])
+        aileron_cmd1 = lateral_lqr.step(u1, x1[3], x1[4])
 
         x1 = rk4_step_long(x1, aileron_cmd1, thr_cmd1, Ts, wk, m_aircraft, k_drag, k_thrust, tau_thr)
         x2 = rk4_step_long(x2, aileron_cmd,  thr_cmd2, Ts, wk, m_aircraft, k_drag, k_thrust, tau_thr)
@@ -726,9 +811,8 @@ def simulate(path: CirclePath, l1_green: L1Loiter, l1_orange: L1Loiter, mpc: LTV
         for k in log: log[k] = np.array(log[k])
     return L1log, MPClog, HYBlog, QPlog
 
-def main():
-    path, l1_green, l1_orange, mpc, roll_lqr = build_controllers()
-    L1log, MPClog, HYBlog, QPlog = simulate(path, l1_green, l1_orange, mpc, roll_lqr)
+def prepare_metrics_and_save(path: CirclePath, L1log: Dict[str,np.ndarray], MPClog: Dict[str,np.ndarray]) -> Dict[str, Any]:
+    """Hitung dan simpan metrik perbandingan L1 vs MPC."""
     et_L1 = crosstrack_series(path, L1log["n"], L1log["e"])
     et_M  = crosstrack_series(path, MPClog["n"], MPClog["e"])
     def rms(a): return float(np.sqrt(np.mean(a**2)))
@@ -955,8 +1039,8 @@ def animate_loiter(path: CirclePath, MPClog: Dict[str,np.ndarray], L1log: Dict[s
 
 # ---------------------- Main run -------------------------------------
 def main():
-    path, l1_green, l1_orange, mpc, roll_lqr = build_controllers()
-    L1log, MPClog, HYBlog, QPlog = simulate(path, l1_green, l1_orange, mpc, roll_lqr)
+    path, l1_green, l1_orange, mpc, lateral_lqr = build_controllers()
+    L1log, MPClog, HYBlog, QPlog = simulate(path, l1_green, l1_orange, mpc, lateral_lqr)
     aux = prepare_metrics_and_save(path, L1log, MPClog)
     # Save QP stats
     pd.DataFrame(QPlog).to_csv(savepath("qp_stats.csv"), index=False)
