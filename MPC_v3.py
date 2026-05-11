@@ -11,14 +11,15 @@ import osqp
 from dataclasses import dataclass
 from typing import Dict, Tuple, Any
 from datetime import datetime
-from scipy.linalg import solve_continuous_are
+from scipy.linalg import solve_continuous_are, expm
 
 # ----------------------- USER PARAMETERS ------------------------------
 # Simulation
 Ts          = 0.10          # [s] simulation step
 T_end       = 150.0          # [s] total sim time
 Va_ref      = 21.0          # [m/s] desired airspeed reference (used by controllers)
-tau_mu      = 0.6           # [s] roll (bank) time constant (LOES)
+tau_mu      = 0.25          # [s] effective roll time constant of LQR closed-loop
+                            #     (LQR dominant pole ≈ -4 rad/s → τ=0.25s, vs LOES 0.6s)
 
 # Longitudinal (airspeed) dynamics & throttle PI
 m_aircraft  = 1.2           # [kg] mass
@@ -38,7 +39,7 @@ aileron_limit_deg = 25.0
 
 # --- Wind model ---
 wind_mode = "constant"   # "constant" | "rotating" | "gust" | "randomwalk" | "custom"
-wind_mean = (2.0, 0.0)   # mean vector for most modes
+wind_mean = (6.0, 0.0)   # mean vector for most modes
 wind_max  = 6.0
 
 # rotating
@@ -88,7 +89,7 @@ w_et_T      = 20.0
 w_echi_T    = 3.0
 
 # LTV-MPC horizon & smoothing
-N_horizon       = 10                   # steps
+N_horizon       = 30                   # steps (3s lookahead; capture from echi=90° needs ~5s)
 w_du            = 40.0                # weight on Δu
 w_mu_Term       = 4.0                 # terminal penalty on (mu_N - mu_ss)^2
 use_cmd_filter  = False               # keep False to assess controller behaviour
@@ -388,8 +389,9 @@ def wind_mode_str() -> str:
 # ---------------- LTV-MPC (QP with OSQP) -----------------------------
 class LTVMPC_OSQP:
     """
-    MPC model uses x=[n,e,chi,mu], input u=mu_cmd with speed Va (from smoothed V_meas).
-    Plant has V dynamics; throttle is handled by outer PI.
+    LTV-MPC. If lateral_lqr is supplied (with a_p_roll, b_p_roll) the model
+    is 5-state x=[n,e,chi,mu,p] with ZOH discretisation; otherwise 4-state
+    x=[n,e,chi,mu] with Euler (backward-compatible).
     """
     def __init__(self, Ts: float, N: int, Va_init: float, tau_mu: float,
                  bank_limit_deg: float, slew_limit_deg_s: float,
@@ -398,7 +400,8 @@ class LTVMPC_OSQP:
                  use_groundspeed_mu_ss: bool=True,
                  Va_min: float=6.0, Va_max: float=60.0,
                  Va_lp_tau: float=0.4, Va_nominal: float=17.0,
-                 use_w_du_scaling: bool=False):
+                 use_w_du_scaling: bool=False,
+                 lateral_lqr=None, a_p_roll: float=0.0, b_p_roll: float=0.0):
         self.Ts   = float(Ts)
         self.N    = int(N)
         self.Va_model = float(Va_init)    # smoothed for linearization
@@ -414,11 +417,31 @@ class LTVMPC_OSQP:
         self.mu_max = np.radians(bank_limit_deg)
         self.du_max = np.radians(slew_limit_deg_s) * self.Ts
         self.use_groundspeed_mu_ss = bool(use_groundspeed_mu_ss)
-        self.nx, self.nu = 4, 1
-        self.E_mu = np.array([0.0, 0.0, 0.0, 1.0]).reshape(1,4)
+        self.nu = 1
+        # 5-state model when LQR is provided; compute closed-loop roll coefficients
+        if lateral_lqr is not None and b_p_roll != 0.0:
+            K_phi_ail = lateral_lqr.K[0, 0] * lateral_lqr._aileron_scale
+            K_p_ail   = lateral_lqr.K[0, 1] * lateral_lqr._aileron_scale
+            # p_dot = -K_phi_cl*(mu - u) + a_eff_cl*p  (closed-loop LQR dynamics)
+            self._K_phi_cl = b_p_roll * K_phi_ail   # coeff of u and -mu in p_dot ≈ 178.9
+            self._a_eff_cl = a_p_roll - b_p_roll * K_p_ail  # effective p damping ≈ -48.8
+            self.nx = 5
+            # Fast closed-loop eigenvalue: λ_fast = (a_eff ± sqrt(a_eff²-4*K_phi))/2
+            _disc = self._a_eff_cl**2 - 4.0 * self._K_phi_cl
+            _lam_fast = (self._a_eff_cl - math.sqrt(max(0.0, _disc))) / 2.0
+            # RK4 stable when |λ*dt| ≤ 2.79; use safety margin → target |λ*dt| ≤ 1.5
+            self._rk4_sub = max(1, math.ceil(abs(_lam_fast) * self.Ts / 1.5))
+            print(f"[LTVMPC] 5-state model: λ_fast={_lam_fast:.1f} rad/s → rk4_sub={self._rk4_sub}")
+        else:
+            self._K_phi_cl = None
+            self._a_eff_cl = None
+            self.nx = 4
+            self._rk4_sub = 1
+        self.E_mu = np.zeros((1, self.nx)); self.E_mu[0, 3] = 1.0
         # warm-start cache
         self._z_prev = None
         self._y_prev = None
+        self._u_opt_seq = None   # previous optimal u sequence for shifted nominal
         # OSQP workspace & templates
         self._prob = None
         self._P_tpl = None; self._A_tpl = None
@@ -426,8 +449,17 @@ class LTVMPC_OSQP:
 
     # ----- model -----
     def _f(self, x: np.ndarray, u: float, wind: Tuple[float,float]) -> np.ndarray:
-        n,e,chi,mu = x; wn,we = wind; g=9.81
-        Va = self.Va_model
+        wn,we = wind; g=9.81; Va = self.Va_model
+        n,e,chi,mu = x[0],x[1],x[2],x[3]
+        if self.nx == 5:
+            p = x[4]
+            return np.array([
+                Va*np.cos(chi)+wn,
+                Va*np.sin(chi)+we,
+                (g/max(1.0,Va))*np.tan(mu),
+                p,
+                -self._K_phi_cl*mu + self._a_eff_cl*p + self._K_phi_cl*u
+            ], dtype=float)
         return np.array([
             Va*np.cos(chi)+wn,
             Va*np.sin(chi)+we,
@@ -436,28 +468,41 @@ class LTVMPC_OSQP:
         ], dtype=float)
 
     def _rk4(self, x: np.ndarray, u: float, wind: Tuple[float,float]) -> np.ndarray:
-        Ts=self.Ts
-        k1=self._f(x,u,wind)
-        k2=self._f(x+0.5*Ts*k1,u,wind)
-        k3=self._f(x+0.5*Ts*k2,u,wind)
-        k4=self._f(x+Ts*k3,u,wind)
-        return x + (Ts/6.0)*(k1+2*k2+2*k3+k4)
+        dt = self.Ts / self._rk4_sub
+        for _ in range(self._rk4_sub):
+            k1=self._f(x,u,wind)
+            k2=self._f(x+0.5*dt*k1,u,wind)
+            k3=self._f(x+0.5*dt*k2,u,wind)
+            k4=self._f(x+dt*k3,u,wind)
+            x = x + (dt/6.0)*(k1+2*k2+2*k3+k4)
+        return x
 
     def _AB_discrete(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        n,e,chi,mu = x
-        Va=self.Va_model; g=9.81; tau=self.tau
-        J = np.zeros((4,4))
-        J[0,2] = -Va*np.sin(chi)
-        J[1,2] =  Va*np.cos(chi)
-        J[2,3] = (g/max(1.0,Va))*(1/np.cos(mu))**2
-        J[3,3] = -1.0/tau
-        Bc = np.zeros((4,1)); Bc[3,0] = 1.0/tau
-        A = np.eye(4) + self.Ts*J
-        B = self.Ts*Bc
-        return A, B
+        chi,mu = x[2],x[3]
+        Va=self.Va_model; g=9.81
+        nx=self.nx; nu=self.nu
+        Jc = np.zeros((nx,nx))
+        Jc[0,2] = -Va*np.sin(chi)
+        Jc[1,2] =  Va*np.cos(chi)
+        Jc[2,3] = (g/max(1.0,Va))*(1/np.cos(mu))**2
+        Bc = np.zeros((nx,nu))
+        if nx == 5:
+            Jc[3,4] = 1.0
+            Jc[4,3] = -self._K_phi_cl
+            Jc[4,4] = self._a_eff_cl
+            Bc[4,0] = self._K_phi_cl
+            # ZOH exact discretization via matrix exponential
+            M = np.zeros((nx+nu, nx+nu))
+            M[:nx, :nx] = Jc; M[:nx, nx:] = Bc
+            eM = expm(M * self.Ts)
+            return eM[:nx, :nx], eM[:nx, nx:]
+        # 4-state: Euler (backward compatible)
+        Jc[3,3] = -1.0/self.tau
+        Bc[3,0] = 1.0/self.tau
+        return np.eye(nx) + self.Ts*Jc, self.Ts*Bc
 
     def _et_echi_and_C(self, x: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
-        n,e,chi,mu = x
+        n,e,chi,mu = x[0],x[1],x[2],x[3]
         Cc = np.asarray(self.path.C)
         rvec = np.array([n, e]) - Cc
         r   = float(np.linalg.norm(rvec)) + 1e-9
@@ -467,10 +512,11 @@ class LTVMPC_OSQP:
         echi0 = wrap(chi_d - chi)
         rhat = rvec / r
         dalpha = np.array([-np.sin(alpha)/r, np.cos(alpha)/r])
-        dechi  = np.zeros(4); dechi[0:2] = dalpha; dechi[2] = -1.0
-        det    = np.zeros(4); det[0:2]   = rhat
-        dmu    = np.array([0,0,0,1], dtype=float)
-        C = np.vstack([det, dechi, dmu]).astype(float)  # 3x4
+        nx = self.nx
+        det   = np.zeros(nx); det[0:2]   = rhat
+        dechi = np.zeros(nx); dechi[0:2] = dalpha; dechi[2] = -1.0
+        dmu   = np.zeros(nx); dmu[3]     = 1.0
+        C = np.vstack([det, dechi, dmu]).astype(float)  # 3×nx
         y0 = np.array([et0, echi0, mu], dtype=float)
         return et0, echi0, C, y0
 
@@ -506,10 +552,17 @@ class LTVMPC_OSQP:
 
         N=self.N; nx=self.nx; nu=self.nu
 
-        # nominal trajectory with u_nom = u_prev
+        # nominal trajectory: use shifted previous optimal sequence only when
+        # the previous solution was well within bank limits (not during aggressive
+        # capture), to avoid extremal linearisation causing instability
         x_nom = np.zeros((N+1,nx)); x_nom[0,:] = x_cur
+        use_shifted = (self._u_opt_seq is not None and
+                       len(self._u_opt_seq) == N and
+                       np.max(np.abs(self._u_opt_seq)) < 0.7 * self.mu_max)
+        u_nom_seq = (np.append(self._u_opt_seq[1:], self._u_opt_seq[-1])
+                     if use_shifted else np.full(N, u_prev))
         for k in range(N):
-            x_nom[k+1,:] = self._rk4(x_nom[k,:], u_prev, wind)
+            x_nom[k+1,:] = self._rk4(x_nom[k,:], u_nom_seq[k], wind)
 
         # linearize
         Aks=[]; Bks=[]
@@ -600,6 +653,10 @@ class LTVMPC_OSQP:
         u = np.array(u, dtype=float)
 
         # ---------- build/update OSQP problem ----------
+        # Safety: reset if sparsity changed (e.g. sin(chi)→0 at chi≈0/π)
+        if self._prob is not None and len(A_full.data) != len(self._A.data):
+            self._prob = None
+
         P_full = sp.csc_matrix((Q + Q.T) * 0.5)
         P_full = 2.0 * P_full  # OSQP uses 0.5 z^T P z + q^T z
         P_num = P_full.toarray()
@@ -661,6 +718,8 @@ class LTVMPC_OSQP:
             self._y_prev = None
 
         z = res.x
+        self._u_opt_seq = np.array([u_prev + float(z[(N+1)*nx + k]) for k in range(N)])
+
         du0 = z[(N+1)*nx + 0] if N>0 else 0.0
         u_cmd = float(np.clip(u_prev + du0, -self.mu_max, self.mu_max))
         return u_cmd, info
@@ -702,14 +761,14 @@ def build_controllers() -> Tuple[CirclePath, L1Loiter, L1Loiter, LTVMPC_OSQP, La
     l1_green  = L1Loiter(L1_period, L1_damping, bank_limit_deg, l1_dir)
     l1_orange = L1Loiter(L1_period, L1_damping, bank_limit_deg, l1_dir)
     Wg = MPCWeights(w_et, w_echi, w_mu, w_u, w_et_T, w_echi_T)
+    # Inner loop: 6-state LQR dari Nugroho et al. (2022)
+    lateral_lqr = LateralLQR()
     mpc = LTVMPC_OSQP(Ts=Ts, N=N_horizon, Va_init=Va_ref, tau_mu=tau_mu,
                       bank_limit_deg=bank_limit_deg, slew_limit_deg_s=slew_limit_deg_s,
                       weights=Wg, path=path, w_du=w_du, w_mu_Term=w_mu_Term,
                       use_groundspeed_mu_ss=True, Va_nominal=Va_nominal,
-                      use_w_du_scaling=use_w_du_scaling)
-    # Inner loop: 6-state LQR dari Nugroho et al. (2022)
-    # fokus 2D lateral → hanya phi (mu) dan p yang aktif
-    lateral_lqr = LateralLQR()
+                      use_w_du_scaling=use_w_du_scaling,
+                      lateral_lqr=lateral_lqr, a_p_roll=a_p, b_p_roll=b_p)
     return path, l1_green, l1_orange, mpc, lateral_lqr
 
 # ====== 2) Simulasi plant + hybrid + logging ==========================
@@ -751,7 +810,7 @@ def simulate(path: CirclePath, l1_green: L1Loiter, l1_orange: L1Loiter, mpc: LTV
         uL1_cap = l1_orange.command(x2, path, Va_ref, wk)
 
         # MPC uses measured V (smoothed inside)
-        uMPC, qpinfo = mpc.step(x2[:4], wk, u_prev, V_meas=x2[5])
+        uMPC, qpinfo = mpc.step(x2[:mpc.nx], wk, u_prev, V_meas=x2[5])
         QPlog["iter"].append(qpinfo.get("iter", np.nan))
         QPlog["obj"].append(qpinfo.get("obj", np.nan))
         QPlog["status"].append(qpinfo.get("status", ""))
