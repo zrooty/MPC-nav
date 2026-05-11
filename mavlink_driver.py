@@ -53,7 +53,7 @@ def _load_mpc_module():
 
 # ====================== USER PARAMETERS (EDIT HERE) ====================
 # MAVLink
-MAVLINK_URL  = "udp:0.0.0.0:14580"
+MAVLINK_URL  = "udp:0.0.0.0:14540"
 # Autopilot type: "ardupilot" | "px4"
 AUTOPILOT_TYPE = "px4"
 
@@ -192,6 +192,12 @@ def roll_deg_to_pwm_linear(roll_deg: float) -> int:
     pwm = int(round(PWM_TRIM + k * roll_deg))
     return min(PWM_MAX, max(PWM_MIN, pwm))
 
+def roll_deg_to_manual_y(roll_deg: float) -> int:
+    # map -BANK_LIMIT_DEG..BANK_LIMIT_DEG to -1000..1000 (standard for MANUAL_CONTROL)
+    roll_deg = max(-BANK_LIMIT_DEG, min(BANK_LIMIT_DEG, roll_deg))
+    val = int(round((roll_deg / max(1.0, BANK_LIMIT_DEG)) * 1000))
+    return max(-1000, min(1000, val))
+
 def connect_mavlink(url: str) -> mavutil.mavfile:
     dialect = "ardupilotmega" if AUTOPILOT_TYPE == "ardupilot" else "common"
     m = mavutil.mavlink_connection(url, autoreconnect=True, dialect=dialect)
@@ -222,6 +228,12 @@ def set_mode(m: mavutil.mavfile, name: str) -> None:
                                     mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
                                     mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
                                     6, 0, 0, 0, 0, 0)
+        elif name.upper() == "ALTITUDE":
+            # PX4 ALTITUDE: main_mode=2, sub_mode=0
+            m.mav.command_long_send(m.target_system, m.target_component,
+                                    mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                                    2, 0, 0, 0, 0, 0)
         else:
             print(f"[MAV] PX4 set_mode '{name}' not specifically implemented, skipping.")
         return
@@ -515,7 +527,7 @@ def att_sender(m: mavutil.mavfile, S: Shared, hz: float=TX_HZ):
     next_t=time.monotonic(); t0=time.monotonic(); cnt=0
     try:
         if AUTOPILOT_TYPE == "px4":
-            set_mode(m, "OFFBOARD")
+            set_mode(m, "ALTITUDE")
         else:
             set_mode(m, "FBWB")
     except Exception:
@@ -526,25 +538,17 @@ def att_sender(m: mavutil.mavfile, S: Shared, hz: float=TX_HZ):
         with S.state_lock: st = NavState(**vars(S.state))
         if (time.monotonic()-st.ts) > STALE_TIMEOUT: continue
 
-        if AUTOPILOT_TYPE == "px4":
-            # PX4 OFFBOARD: Use SET_ATTITUDE_TARGET
-            q = euler_to_quaternion(roll_cmd, st.pitch, st.yaw)
-            # type_mask=7: ignore body rates, use quaternion + thrust
-            m.mav.set_attitude_target_send(
-                int((time.monotonic()-BOOT_T0)*1000),
-                m.target_system, m.target_component,
-                7,
-                q,
-                0, 0, 0,
-                st.throttle if st.throttle > 0.01 else 0.5 # fallback thrust 50%
-            )
-        else:
-            # ArduPilot: mapping linear dari BANK_LIMIT_DEG → PWM
-            pwm = roll_deg_to_pwm_linear(math.degrees(roll_cmd))
-            m.mav.rc_channels_override_send(
-                m.target_system, m.target_component,
-                pwm, 1500, 1550, 0, 0, 0, 0, 0
-            )
+        # mapping linear dari BANK_LIMIT_DEG → MANUAL_CONTROL (-1000..1000)
+        # Ini dianggap valid pilot input oleh PX4 (lebih reliable dibanding RC override)
+        roll_val = roll_deg_to_manual_y(math.degrees(roll_cmd))
+        m.mav.manual_control_send(
+            m.target_system,
+            0,          # x (pitch)
+            roll_val,   # y (roll)
+            500,        # z (throttle, 0–1000)
+            0,          # r (yaw)
+            0           # buttons
+        )
         if (time.monotonic()-t0)>=1.0:
             S.hz_tx = cnt / (time.monotonic()-t0); t0=time.monotonic(); cnt=0
 
