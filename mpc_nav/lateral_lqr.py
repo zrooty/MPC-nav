@@ -27,10 +27,10 @@ from scipy.linalg import solve_continuous_are
 from . import config
 
 
-# Inertia estimate for ~1.2 kg UAV, consistent with the article.
+# Inertia  for ~1.2 kg UAV.
 _IXX = 0.05   # [kg.m²] roll inertia
-_IYY = 0.10   # [kg.m²] pitch inertia (dummy)
-_IZZ = 0.12   # [kg.m²] yaw inertia (dummy)
+_IYY = 0.10   # [kg.m²] pitch inertia 
+_IZZ = 0.12   # [kg.m²] yaw inertia 
 
 
 def _build_AB() -> tuple[np.ndarray, np.ndarray]:
@@ -50,8 +50,8 @@ def _build_AB() -> tuple[np.ndarray, np.ndarray]:
 
     B = np.zeros((6, 3))
     B[1, 0] = 1.0 / _IXX   # p_dot from tau1
-    B[3, 1] = 1.0 / _IYY   # q_dot from tau2 (dummy)
-    B[5, 2] = 1.0 / _IZZ   # r_dot from tau3 (dummy)
+    B[3, 1] = 1.0 / _IYY   # q_dot from tau2 
+    B[5, 2] = 1.0 / _IZZ   # r_dot from tau3 
     return A, B
 
 
@@ -60,15 +60,15 @@ def _build_AB() -> tuple[np.ndarray, np.ndarray]:
 _Q_LQR = np.diag([
     80.0,   # phi   – tight tracking
     5.0,    # p     – damping
-    1.0,    # theta (dummy)
-    0.5,    # q     (dummy)
-    1.0,    # psi   (dummy)
-    0.5,    # r     (dummy)
+    70.0,    # theta 
+    5.5,    # q     
+    10,    # psi   
+    4.0,    # r     
 ])
 _R_LQR = np.diag([
     1.0,    # tau1 (aileron)
-    10.0,   # tau2 (dummy – heavy so it stays inactive)
-    10.0,   # tau3 (dummy)
+    1.0,   # tau2 
+    1.0,   # tau3 
 ])
 
 
