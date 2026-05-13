@@ -3,53 +3,20 @@
 """
 lateral driver (RC override CH1) with **all parameters in this file**.
 - Choose LATERAL_MODE: "l1" | "mpc" | "blend"
-- L1 and MPC are instantiated using parameters below (no reliance on MPC_15 constants).
+- L1 and MPC are instantiated using parameters below.
 - Path, weights, limits, horizon, wind feed, and shaping are all configured here.
 """
 
-import os, math, time, csv, threading, importlib, datetime as _dt
+import os, math, time, csv, threading, datetime as _dt
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import numpy as np
 from pymavlink import mavutil
 import psutil
 
-
-# ==== MPC module resolution (set path here if needed) ====
-MPC_MODULE_NAME = "MPC_v2"
-MPC_MODULE_PATH = ""  # e.g., r"C:\\Users\\you\\project\\MPC_15.py" or "/home/you/project/MPC_15.py"
-
-def _load_mpc_module():
-    import importlib, importlib.util, sys, os
-    name = MPC_MODULE_NAME
-    if MPC_MODULE_PATH:
-        mp = MPC_MODULE_PATH
-        if not os.path.exists(mp):
-            raise FileNotFoundError(f"[INIT] MPC module not found at MPC_MODULE_PATH='{mp}'. "
-                                    f"Set MPC_MODULE_PATH to the absolute path of MPC_15.py, "
-                                    f"or place MPC_15.py in the same folder as this driver.")
-        spec = importlib.util.spec_from_file_location(name, mp)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[name] = mod
-        spec.loader.exec_module(mod)
-        print(f"[INIT] Loaded MPC module from explicit path: {mp}")
-        return mod
-    try:
-        mod = importlib.import_module(name)
-        print(f"[INIT] Imported MPC module by name: {name}")
-        return mod
-    except ModuleNotFoundError:
-        here = os.path.dirname(__file__) if "__file__" in globals() else os.getcwd()
-        alt = os.path.join(here, name + ".py")
-        if os.path.exists(alt):
-            spec = importlib.util.spec_from_file_location(name, alt)
-            mod = importlib.util.module_from_spec(spec)
-            sys.modules[name] = mod
-            spec.loader.exec_module(mod)
-            print(f"[INIT] Loaded MPC module from local file: {alt}")
-            return mod
-        raise FileNotFoundError(f"[INIT] Cannot find MPC_15.py. Put MPC_15.py in the same folder as this driver "
-                                f"or set MPC_MODULE_PATH to its absolute path.")
+from mpc_nav.geometry import CirclePath
+from mpc_nav.l1_loiter import L1Loiter
+from mpc_nav.ltv_mpc import LTVMPC_OSQP, MPCWeights
 
 # ====================== USER PARAMETERS (EDIT HERE) ====================
 # MAVLink
@@ -357,15 +324,13 @@ def state_reader(m: mavutil.mavfile, S: Shared):
 
 
 def ctl_worker(m: mavutil.mavfile, S: Shared):
-    MPC = _load_mpc_module()
-
     # ----- Build path & controllers from DRIVER PARAMETERS -----
-    path = MPC.CirclePath(LOITER_C, LOITER_R, cw=LOITER_CW)
+    path = CirclePath(LOITER_C, LOITER_R, cw=LOITER_CW)
     l1_dir = (-1 if LOITER_CW else +1)
-    l1 = MPC.L1Loiter(L1_PERIOD, L1_DAMPING, BANK_LIMIT_DEG, l1_dir)
+    l1 = L1Loiter(L1_PERIOD, L1_DAMPING, BANK_LIMIT_DEG, l1_dir)
 
-    W = MPC.MPCWeights(MPC_W_ET, MPC_W_ECHI, MPC_W_MU, MPC_W_U, MPC_W_ET_T, MPC_W_ECHI_T)
-    mpc = MPC.LTVMPC_OSQP(
+    W = MPCWeights(MPC_W_ET, MPC_W_ECHI, MPC_W_MU, MPC_W_U, MPC_W_ET_T, MPC_W_ECHI_T)
+    mpc = LTVMPC_OSQP(
         Ts=Ts, N=MPC_HORIZON, Va_init=MPC_VA_INIT, tau_mu=MPC_TAU_MU,
         bank_limit_deg=BANK_LIMIT_DEG, slew_limit_deg_s=MPC_SLEW_DEG_S,
         weights=W, path=path, w_du=MPC_W_DU, w_mu_Term=MPC_W_MU_TERM,
@@ -454,7 +419,9 @@ def ctl_worker(m: mavutil.mavfile, S: Shared):
             u_prev_warm = u_prev
 
         # --- L1 & MPC commands (L1 biasa; MPC pakai u_prev_warm) ---
-        xL1 = np.array([st.N, st.E, st.psi, u_prev, Vg, 0.5], float)
+        # State vector: [n, e, chi, mu, p, V, thr]
+        # p (roll rate) is unavailable from MAVLink in this setup → set to 0.0
+        xL1 = np.array([st.N, st.E, st.psi, u_prev, 0.0, Vg, 0.5], float)
         uL1 = l1.command(xL1, path, Va_for_ctrl=Vg, wind=wind_NE)
 
         xM  = np.array([st.N, st.E, st.psi, u_prev], float)  # state tetap u_prev
@@ -593,7 +560,7 @@ def logger_thread(S: Shared, csv_path: str=CSV_PATH):
 # ======================= Main ========================================
 def main():
     print("[RUN] URL:", MAVLINK_URL, " | MODE:", LATERAL_MODE.upper())
-    print("[RUN] Expect MPC_15.py to be resolvable. If not, set MPC_MODULE_PATH inside this file.")
+    print("[RUN] Controllers loaded from mpc_nav package.")
     m = connect_mavlink(MAVLINK_URL)
     S = Shared()
     th_rx = threading.Thread(target=state_reader, args=(m,S), daemon=True)
