@@ -49,9 +49,13 @@ from mpc_nav.ltv_mpc import LTVMPC_OSQP, MPCWeights
 from mpc_nav.simulation import _step_plant, _throttle_step
 from mpc_nav.stats import rms as _rms
 
-# ---- search budget (override here or via the run; kept modest by default) ----
-MPC_RANDOM_SAMPLES = 60       # random candidates before the local refine
-MPC_REFINE_ITERS   = 80       # Nelder-Mead max iterations
+# ---- search budget ----------------------------------------------------------
+# NOTE: one MPC evaluation is a full 150 s sim with a QP solved every step
+# (~80 s wall-clock on this machine). L1/PID evals are ~0.3 s. So MPC dominates:
+# (random + refine) * ~80 s. Keep these small unless you can wait — e.g.
+# 20 + 30 ~= 50 evals ~= 1 hour. Raise them for a more thorough (overnight) search.
+MPC_RANDOM_SAMPLES = 20       # random candidates before the local refine
+MPC_REFINE_ITERS   = 30       # Nelder-Mead max iterations
 RNG_SEED           = 0        # deterministic random search
 
 
