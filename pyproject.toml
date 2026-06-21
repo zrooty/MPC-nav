@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mpc-nav"
+version = "0.1.0"
+description = "UAV loiter (circular orbit) guidance study — lateral controllers compared in a shared closed-loop simulation, plus a MAVLink/SITL driver."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "osqp",
+    "matplotlib",
+    "pandas",
+]
+
+[project.optional-dependencies]
+# Hardware-in-the-loop / SITL driver (hardware/ package and scripts/sitl_auto_eval.py)
+hardware = [
+    "pymavlink",
+    "psutil",
+]
+
+[tool.setuptools]
+# Importable top-level packages. Installing with `pip install -e .` makes these
+# importable from anywhere, so PYTHONPATH=. is no longer required.
+packages = ["mpc_nav", "hardware"]

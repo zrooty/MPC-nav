@@ -1,0 +1,10 @@
+# Core simulation (mpc_nav package + scripts/tune_l1.py + tests)
+numpy
+scipy
+osqp
+matplotlib
+pandas
+
+# Hardware-in-the-loop / SITL driver (hardware/ package, scripts/sitl_auto_eval.py)
+pymavlink
+psutil
