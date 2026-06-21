@@ -1,7 +1,7 @@
 """Geometry helpers: angle wrapping, circle path, orbit error metrics."""
 from __future__ import annotations
 import math
-from typing import Tuple
+from typing import NamedTuple, Tuple
 import numpy as np
 
 from . import config
@@ -10,6 +10,34 @@ from . import config
 def wrap(a: float) -> float:
     """Wrap angle to (-π, π]."""
     return math.atan2(math.sin(a), math.cos(a))
+
+
+class RadialKinematics(NamedTuple):
+    """Groundspeed and radial-error quantities shared by the loiter laws."""
+    vg: np.ndarray   # ground-velocity vector [N, E]
+    Vg: float        # groundspeed magnitude (floored at 1.0)
+    A: np.ndarray    # vector from circle centre to aircraft [N, E]
+    r: float         # distance to centre (+1e-9 guard)
+    Ahat: np.ndarray # radial unit vector
+    e_r: float       # signed radial error rho - R (>0 outside)
+    rdot: float      # radial velocity Ahat·vg (>0 moving outward)
+
+
+def radial_kinematics(x: np.ndarray, wind: Tuple[float, float],
+                      path: "CirclePath") -> RadialKinematics:
+    """Common groundspeed + radial-error block used by L1/PI/PID loiter laws.
+
+    Centralises the ``+1e-9`` distance guard and the ``max(1.0, …)``
+    groundspeed floor so the three controllers stay consistent.
+    """
+    n, e, chi, mu, p, V, thr = x
+    wn, we = wind
+    vg = np.array([V * math.cos(chi) + wn, V * math.sin(chi) + we])
+    Vg = max(1.0, float(np.linalg.norm(vg)))
+    A = np.array([n, e]) - np.asarray(path.C, dtype=float)
+    r = float(np.linalg.norm(A)) + 1e-9
+    Ahat = A / r
+    return RadialKinematics(vg, Vg, A, r, Ahat, r - path.R, float(Ahat @ vg))
 
 
 class CirclePath:

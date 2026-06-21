@@ -29,7 +29,7 @@ import math
 from typing import Tuple
 import numpy as np
 
-from .geometry import CirclePath
+from .geometry import CirclePath, radial_kinematics
 
 _G = 9.81
 
@@ -54,24 +54,18 @@ class PIDLoiter:
     def command(self, x: np.ndarray, path: CirclePath,
                 Va_for_ctrl: float, wind: Tuple[float, float]) -> float:
         # Va_for_ctrl is unused (we use groundspeed) — kept for API symmetry.
-        n, e, chi, mu, p, V, thr = x
-        wn, we = wind
-
-        vg = np.array([V * math.cos(chi) + wn, V * math.sin(chi) + we])
-        Vg = max(1.0, float(np.linalg.norm(vg)))
-
-        A = np.array([n, e]) - np.asarray(path.C, dtype=float)
-        r = float(np.linalg.norm(A)) + 1e-9
-        Ahat = A / r
-        e_r = r - path.R                      # >0 outside the circle
-        rdot = float(Ahat @ vg)               # >0 moving outward
+        rk = radial_kinematics(x, wind, path)
+        e_r = rk.e_r                          # >0 outside the circle
+        rdot = rk.rdot                        # >0 moving outward
 
         # PID on radial error. Tentatively advance the integrator, then decide
-        # whether to commit it (conditional anti-windup, below).
+        # whether to commit it (conditional anti-windup, below). The Kd term
+        # is what makes this stable where the pure-PI baseline diverges; with
+        # Kd=0 this reduces exactly to PILoiter.
         integ_new = self.integ + e_r * self.Ts
         phi_pid = self.Kp * e_r + self.Kd * rdot + self.Ki * integ_new
 
-        phi_ff = math.atan((Vg * Vg) / (_G * path.R)) if self.use_ff else 0.0
+        phi_ff = math.atan((rk.Vg * rk.Vg) / (_G * path.R)) if self.use_ff else 0.0
 
         phi_unsat = self.sign_dir * (phi_ff + phi_pid)
         phi_cmd = float(np.clip(phi_unsat, -self.bank_lim, self.bank_lim))

@@ -8,7 +8,7 @@ import math
 from typing import Tuple
 import numpy as np
 
-from .geometry import CirclePath
+from .geometry import CirclePath, radial_kinematics
 
 _G = 9.81
 
@@ -23,21 +23,14 @@ class L1Loiter:
     def command(self, x: np.ndarray, path: CirclePath,
                 Va_for_ctrl: float, wind: Tuple[float, float]) -> float:
         # Va_for_ctrl is unused (we use groundspeed) — kept for API symmetry.
-        n, e, chi, mu, p, V, thr = x
-        wn, we = wind
-
-        vg = np.array([V * math.cos(chi) + wn, V * math.sin(chi) + we])
-        Vg = max(1.0, np.linalg.norm(vg))
+        rk = radial_kinematics(x, wind, path)
+        vg, Vg, Ahat, r = rk.vg, rk.Vg, rk.Ahat, rk.r
 
         omega = 2.0 * math.pi / self.period
         Kx = omega ** 2
         Kv = 2.0 * self.damping * omega
         K_L1 = 4.0 * (self.damping ** 2)
         L1_dist = (1.0 / math.pi) * self.damping * self.period * Vg  # groundspeed-based lookahead
-
-        A = np.array([n, e]) - np.asarray(path.C)
-        r = np.linalg.norm(A) + 1e-9
-        Ahat = A / r
 
         # Capture geometry
         xtrackVelCap = Ahat[0] * vg[1] - Ahat[1] * vg[0]
