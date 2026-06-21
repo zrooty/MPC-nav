@@ -15,8 +15,10 @@ from .wind import wind_at, wind_mode_str
 # Static plots
 # ----------------------------------------------------------------------
 def make_static_plots(path, L1log: Dict[str, np.ndarray], MPClog: Dict[str, np.ndarray],
+                      PIlog: Dict[str, np.ndarray], PIDlog: Dict[str, np.ndarray],
                       aux: Dict[str, Any]) -> None:
-    et_L1, et_M, t_arr = aux["et_L1"], aux["et_MPC"], aux["t"]
+    et_L1, et_M, et_PID, t_arr = (aux["et_L1"], aux["et_MPC"],
+                                    aux["et_PID"], aux["t"])
 
     # --- Trajectory with wind annotation
     fig, ax = plt.subplots(figsize=(6, 6))
@@ -26,8 +28,8 @@ def make_static_plots(path, L1log: Dict[str, np.ndarray], MPClog: Dict[str, np.n
             "--", lw=1.3, color="tab:gray", alpha=config.alpha_circle,
             label=f"Circle ref ({'CW' if path.cw else 'CCW'})")
 
-    all_n = np.concatenate([MPClog["n"], L1log["n"]])
-    all_e = np.concatenate([MPClog["e"], L1log["e"]])
+    all_n = np.concatenate([MPClog["n"], L1log["n"], PIDlog["n"]])
+    all_e = np.concatenate([MPClog["e"], L1log["e"], PIDlog["e"]])
     nxmin, nxmax = float(np.min(all_n)), float(np.max(all_n))
     exmin, exmax = float(np.min(all_e)), float(np.max(all_e))
     pad_n = 0.1 * (nxmax - nxmin + 1e-6)
@@ -54,6 +56,7 @@ def make_static_plots(path, L1log: Dict[str, np.ndarray], MPClog: Dict[str, np.n
 
     ax.plot(MPClog["n"], MPClog["e"], label="MPC", color="tab:orange", alpha=config.alpha_trails)
     ax.plot(L1log["n"], L1log["e"], label="L1", color="tab:green", alpha=config.alpha_trails)
+    ax.plot(PIDlog["n"], PIDlog["e"], label="PID", color="tab:purple", alpha=config.alpha_trails)
     ax.set_aspect("equal")
     ax.set_xlabel("North [m]"); ax.set_ylabel("East [m]")
     ax.grid(True, alpha=0.4)
@@ -62,26 +65,30 @@ def make_static_plots(path, L1log: Dict[str, np.ndarray], MPClog: Dict[str, np.n
 
     # --- |e_t| vs step
     plt.figure()
-    plt.plot(et_M, label="MPC e_t", alpha=0.9)
-    plt.plot(et_L1, label="L1 e_t", alpha=0.9)
+    plt.plot(et_M, label="MPC e_t", color="tab:orange", alpha=0.9)
+    plt.plot(et_L1, label="L1 e_t", color="tab:green", alpha=0.9)
+    plt.plot(et_PID, label="PID e_t", color="tab:purple", alpha=0.9)
     plt.xlabel("Step"); plt.ylabel("Cross-track error [m]")
     plt.legend(); plt.grid(True)
     savefig_here("et_compare.png")
 
     # --- Bank angles
     plt.figure()
-    plt.plot(np.degrees(MPClog["u_cmd"]), label="MPC mu_ref [deg]", alpha=0.9)
-    plt.plot(np.degrees(MPClog["mu"]),    label="MPC mu [deg]",     alpha=0.9)
-    plt.plot(np.degrees(L1log["u_cmd"]), "--", label="L1 mu_ref [deg]", alpha=0.8)
-    plt.plot(np.degrees(L1log["mu"]),   "--", label="L1 mu [deg]",     alpha=0.8)
+    plt.plot(np.degrees(MPClog["u_cmd"]), label="MPC mu_ref [deg]", color="tab:orange", alpha=0.9)
+    plt.plot(np.degrees(MPClog["mu"]),    label="MPC mu [deg]",     color="tab:orange", ls=":", alpha=0.9)
+    plt.plot(np.degrees(L1log["u_cmd"]), "--", label="L1 mu_ref [deg]", color="tab:green", alpha=0.8)
+    plt.plot(np.degrees(L1log["mu"]),   ":", label="L1 mu [deg]",     color="tab:green", alpha=0.8)
+    plt.plot(np.degrees(PIDlog["u_cmd"]), "--", label="PID mu_ref [deg]", color="tab:purple", alpha=0.8)
+    plt.plot(np.degrees(PIDlog["mu"]),   ":", label="PID mu [deg]",     color="tab:purple", alpha=0.8)
     plt.xlabel("Step"); plt.ylabel("Bank angle [deg]")
     plt.legend(); plt.grid(True)
     savefig_here("bank_compare.png")
 
     # --- e_t vs time
     plt.figure()
-    plt.plot(t_arr, et_M, label="MPC e_t", alpha=0.9)
-    plt.plot(t_arr, et_L1, label="L1 e_t", alpha=0.9)
+    plt.plot(t_arr, et_M, label="MPC e_t", color="tab:orange", alpha=0.9)
+    plt.plot(t_arr, et_L1, label="L1 e_t", color="tab:green", alpha=0.9)
+    plt.plot(t_arr, et_PID, label="PID e_t", color="tab:purple", alpha=0.9)
     plt.axhline(0, ls="--", lw=0.8)
     plt.xlabel("Time [s]"); plt.ylabel("Cross-track error e_t [m]")
     plt.legend(); plt.grid(True)
@@ -109,6 +116,7 @@ def _set_pose_patch(patch, n: float, e: float, chi: float) -> None:
 
 
 def animate_loiter(path, MPClog: Dict[str, np.ndarray], L1log: Dict[str, np.ndarray],
+                   PIlog: Dict[str, np.ndarray], PIDlog: Dict[str, np.ndarray],
                    Ts: float, every_k: int = 2, plane_size: float = 12.0,
                    duration_s: float = 20.0, save_gif: bool = True,
                    save_mp4: bool = False) -> None:
@@ -121,6 +129,7 @@ def animate_loiter(path, MPClog: Dict[str, np.ndarray], L1log: Dict[str, np.ndar
     n_nm, e_nm, chi_nm = MPClog["n"][idx], MPClog["e"][idx], MPClog["chi"][idx]
     mu_nm, p_nm, V_nm = MPClog["mu"][idx], MPClog["p"][idx], MPClog["V"][idx]
     n_l1, e_l1, chi_l1 = L1log["n"][idx], L1log["e"][idx], L1log["chi"][idx]
+    n_pd, e_pd, chi_pd = PIDlog["n"][idx], PIDlog["e"][idx], PIDlog["chi"][idx]
     frames = len(idx)
     fps = min(30, max(5, int(frames / max(1, duration_s))))
 
@@ -135,14 +144,17 @@ def animate_loiter(path, MPClog: Dict[str, np.ndarray], L1log: Dict[str, np.ndar
                         alpha=config.alpha_trails, label="MPC", animated=True)
     trail_l1, = ax.plot([], [], "-", lw=2.0, color="tab:green",
                         alpha=config.alpha_trails, label="L1", animated=True)
+    trail_pd, = ax.plot([], [], "-", lw=2.0, color="tab:purple",
+                        alpha=config.alpha_trails, label="PID", animated=True)
 
-    plane_nm = plane_l1 = None
+    plane_nm = plane_l1 = plane_pd = None
     if config.show_planes:
         plane_nm = _make_aircraft_patch(ax, size=plane_size, color="tab:orange", zorder=6)
         plane_l1 = _make_aircraft_patch(ax, size=plane_size, color="tab:green", zorder=6)
+        plane_pd = _make_aircraft_patch(ax, size=plane_size, color="tab:purple", zorder=6)
 
-    all_n = np.concatenate([MPClog["n"], L1log["n"]])
-    all_e = np.concatenate([MPClog["e"], L1log["e"]])
+    all_n = np.concatenate([MPClog["n"], L1log["n"], PIDlog["n"]])
+    all_e = np.concatenate([MPClog["e"], L1log["e"], PIDlog["e"]])
     pad = 0.2 * max(path.R, np.std(all_n) + np.std(all_e))
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(float(np.min(all_n)) - pad, float(np.max(all_n)) + pad)
@@ -176,19 +188,24 @@ def animate_loiter(path, MPClog: Dict[str, np.ndarray], L1log: Dict[str, np.ndar
     def init():
         trail_nm.set_data([], [])
         trail_l1.set_data([], [])
+        trail_pd.set_data([], [])
         if config.show_planes:
             _set_pose_patch(plane_nm, n_nm[0], e_nm[0], chi_nm[0])
             _set_pose_patch(plane_l1, n_l1[0], e_l1[0], chi_l1[0])
-            return trail_nm, trail_l1, wind_arrow, wind_text, plane_nm, plane_l1
-        return trail_nm, trail_l1, wind_arrow, wind_text
+            _set_pose_patch(plane_pd, n_pd[0], e_pd[0], chi_pd[0])
+            return (trail_nm, trail_l1, trail_pd, wind_arrow, wind_text,
+                    plane_nm, plane_l1, plane_pd)
+        return trail_nm, trail_l1, trail_pd, wind_arrow, wind_text
 
     def update(i):
         nonlocal wind_arrow
         trail_nm.set_data(n_nm[:i + 1], e_nm[:i + 1])
         trail_l1.set_data(n_l1[:i + 1], e_l1[:i + 1])
+        trail_pd.set_data(n_pd[:i + 1], e_pd[:i + 1])
         if config.show_planes:
             _set_pose_patch(plane_nm, n_nm[i], e_nm[i], chi_nm[i])
             _set_pose_patch(plane_l1, n_l1[i], e_l1[i], chi_l1[i])
+            _set_pose_patch(plane_pd, n_pd[i], e_pd[i], chi_pd[i])
         t_i = float(idx[i]) * Ts
         wn, we = wind_at(t_i, state=(n_nm[i], e_nm[i], chi_nm[i], mu_nm[i]))
         try:
@@ -211,8 +228,9 @@ def animate_loiter(path, MPClog: Dict[str, np.ndarray], L1log: Dict[str, np.ndar
             f"Wind mode: {mode_str}"
         )
         if config.show_planes:
-            return trail_nm, trail_l1, wind_arrow, wind_text, plane_nm, plane_l1
-        return trail_nm, trail_l1, wind_arrow, wind_text
+            return (trail_nm, trail_l1, trail_pd, wind_arrow, wind_text,
+                    plane_nm, plane_l1, plane_pd)
+        return trail_nm, trail_l1, trail_pd, wind_arrow, wind_text
 
     anim = animation.FuncAnimation(fig, update, init_func=init,
                                    frames=frames, interval=1000 / fps, blit=True)

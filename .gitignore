@@ -1,7 +1,10 @@
 /logs
-/__pycache__/
+__pycache__/
 prompt.txt
 issue.md
 /mavlink-env
 /gh_2.92.0_linux_amd64
 gh_2.92.0_linux_amd64.tar.gz
+
+# Reference PDFs (kept locally under docs/refs, too large for git)
+*.pdf

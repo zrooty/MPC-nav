@@ -10,14 +10,15 @@ from .plotting import make_static_plots, animate_loiter
 
 
 def main() -> None:
-    path, l1_green, l1_orange, mpc, lateral_lqr = build_controllers()
-    L1log, MPClog, HYBlog, QPlog = simulate(path, l1_green, l1_orange, mpc, lateral_lqr)
-    aux = prepare_metrics_and_save(path, L1log, MPClog)
+    path, l1_green, l1_orange, mpc, pi, pid, lateral_lqr = build_controllers()
+    L1log, MPClog, PIlog, PIDlog, HYBlog, QPlog = simulate(
+        path, l1_green, l1_orange, mpc, pi, pid, lateral_lqr)
+    aux = prepare_metrics_and_save(path, L1log, MPClog, PIlog, PIDlog)
     pd.DataFrame(QPlog).to_csv(savepath("qp_stats.csv"), index=False)
-    make_static_plots(path, L1log, MPClog, aux)
+    make_static_plots(path, L1log, MPClog, PIlog, PIDlog, aux)
 
     if config.make_animation:
-        animate_loiter(path, MPClog, L1log, config.Ts,
+        animate_loiter(path, MPClog, L1log, PIlog, PIDlog, config.Ts,
                        every_k=config.anim_every_kstep,
                        plane_size=config.plane_size_m,
                        duration_s=config.anim_duration_s,
@@ -25,6 +26,7 @@ def main() -> None:
 
     print(f"Artifacts saved in: {run_tag}")
     print(" - traj_compare_with_wind.png, et_compare.png, bank_compare.png, et_series_vs_time.png")
+    print(" - metrics_report.md (human-readable)")
     print(" - metrics_compare.csv, metrics_crosstrack.csv, et_series.csv, qp_stats.csv")
     if config.make_animation:
         suffix = " and uav_loiter_anim.mp4" if config.save_mp4 else ""

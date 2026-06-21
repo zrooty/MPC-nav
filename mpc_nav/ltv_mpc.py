@@ -72,7 +72,7 @@ class LTVMPC_OSQP:
             disc = self._a_eff_cl ** 2 - 4.0 * self._K_phi_cl
             lam_fast = (self._a_eff_cl - math.sqrt(max(0.0, disc))) / 2.0
             self._rk4_sub = max(1, math.ceil(abs(lam_fast) * self.Ts / 1.5))
-            print(f"[LTVMPC] 5-state model: λ_fast={lam_fast:.1f} rad/s → rk4_sub={self._rk4_sub}")
+            print(f"[LTVMPC] 5-state model: lam_fast={lam_fast:.1f} rad/s -> rk4_sub={self._rk4_sub}")
         else:
             self._K_phi_cl = None
             self._a_eff_cl = None

@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 lateral driver (RC override CH1) with **all parameters in this file**.
-- Choose LATERAL_MODE: "l1" | "mpc" | "blend"
-- L1 and MPC are instantiated using parameters below.
+- Choose LATERAL_MODE: "l1" | "mpc" | "pi" | "pid" | "blend"
+- L1, MPC, PI and PID are instantiated using parameters below.
 - Path, weights, limits, horizon, wind feed, and shaping are all configured here.
 """
 
@@ -17,18 +17,31 @@ import psutil
 from mpc_nav.geometry import CirclePath
 from mpc_nav.l1_loiter import L1Loiter
 from mpc_nav.ltv_mpc import LTVMPC_OSQP, MPCWeights
+from mpc_nav.pi_loiter import PILoiter
+from mpc_nav.pid_loiter import PIDLoiter
 
 # ====================== USER PARAMETERS (EDIT HERE) ====================
 # MAVLink
-MAVLINK_URL  = "udp:0.0.0.0:14540"
+# ArduPilot SITL exposes MAVLink on tcp:127.0.0.1:5760 by default (sim_vehicle.py),
+# or add `--out=udp:127.0.0.1:14550` and connect to "udp:127.0.0.1:14550".
+# PX4 SITL offboard default was udp:0.0.0.0:14540.
+MAVLINK_URL  = "udp:172.24.32.1:14550"   # ArduPilot SITL (was udp:0.0.0.0:14540 for PX4)
 # Autopilot type: "ardupilot" | "px4"
-AUTOPILOT_TYPE = "px4"
+AUTOPILOT_TYPE = "ardupilot"
 
-# Mode: "l1" (capture only), "mpc" (tracker only), "blend" (L1→MPC with gating+easing)
+# Mode: "l1" (capture), "mpc" (tracker), "pi" (naive radial PI — DIVERGENT baseline),
+#       "pid" (radial PI + rdot damping — functional classical baseline),
+#       "blend" (L1→MPC with gating+easing)
+# On SITL, test ONE controller at a time: start with L1 (simplest/robust), validate
+# capture + hold, then "pid"/"mpc", then "blend". See .docs/sitl_test_protocol.md.
 LATERAL_MODE = "blend"
 
 # Timing
-Ts               = 0.05     # controller step [s]
+Ts               = 0.10     # outer-guidance step [s]. 20 Hz (0.05) is overkill for
+                            # outer guidance — ArduPilot's own loops run fast. 10 Hz
+                            # halves the MPC QP size for the same TIME-horizon, so N
+                            # can reach radius-scale lookahead and still solve in budget.
+                            # Watch exec_time_ms in the CSV; keep it well under Ts*1000.
 TX_HZ            = 15.0     # RC override send rate [Hz]
 STALE_TIMEOUT    = 0.7      # state freshness guard [s]
 
@@ -37,14 +50,25 @@ LOITER_C   = (0.0, 0.0)     # (N,E) [m]
 LOITER_R   = 180.0          # [m]
 LOITER_CW  = False           # True: clockwise
 
-# L1 settings
-L1_PERIOD   = 17.0          # [s]
-L1_DAMPING  = 0.707          # [-]
+# L1 settings — scaled for THIS driver's operating point (R=180 m, Va~22 m/s),
+# NOT the sim's (R=90, Va=21). Sim-tuned L1 is T=12/zeta=0.80 with lookahead
+# L1_dist=(1/pi)*zeta*T*Vg ~= 0.71*R. To preserve that lookahead/radius ratio at
+# R=180: T ~= 0.71*R*pi/(zeta*Vg) = 0.71*180*pi/(0.80*22) ~= 22 s. STARTING POINT
+# — re-tune on SITL (sweep T, watch rerr settling + bank-rate in the CSV log).
+L1_PERIOD   = 22.0          # [s]   (was 17.0; scaled to R=180)
+L1_DAMPING  = 0.80          # [-]   (was 0.707; damping is dimensionless, transfers)
 BANK_LIMIT_DEG = 50.0       # [deg] bank limit seen by both L1 & MPC
 
 # MPC model & solver settings
-MPC_TAU_MU          = 0.45    # [s] bank time constant (LOES)
-MPC_HORIZON         = 40     # steps
+MPC_TAU_MU          = 0.45    # [s] effective roll closed-loop time constant of the
+                              # AUTOPILOT (FBWB roll loop), NOT the sim's LQR. This is
+                              # the #1 MPC-fidelity param on SITL: identify it by
+                              # commanding a bank step in FBWB and fitting the roll
+                              # response, then set tau here.
+MPC_HORIZON         = 50     # steps. At Ts=0.10 -> 5.0 s ~= 110 m ~= 0.6*R at R=180
+                             # (sim used N=40 @ Ts=0.1 = 4 s for R=90). Longer N =
+                             # better capture but heavier QP; if exec_time_ms nears
+                             # Ts*1000, reduce N. Re-tune on SITL.
 MPC_SLEW_DEG_S      = 9.0  # [deg/s] Δu/Δt limit inside MPC
 MPC_USE_GS_FOR_MUss = False   # centripetal bank uses groundspeed if True
 MPC_W_ET            = 1.0   # stage weight on cross-track radius error e_t
@@ -60,6 +84,21 @@ MPC_VA_MIN_MAX      = (6.0, 30.0)
 MPC_VA_LP_TAU       = 1.0    # [s] low-pass on measured Va used by MPC
 MPC_USE_W_DU_SCALING= True  # scale w_du with Va^2 / Va_nom^2
 MPC_VA_NOMINAL      = 22.0   # [m/s] for scaling (if enabled)
+
+# PI / PID baseline settings (classical radial controllers, bank-angle output) ----
+# phi_cmd = sign_dir * (phi_ff + Kp*e_r [+ Kd*rdot] [+ Ki*int e_r]),  e_r = rho - R.
+# PI  = naive radial PI: heading-blind, no rate damping -> DIVERGENT (negative
+#       baseline, same role as in the sim — see .docs/pi_baseline_notes.md).
+# PID = adds Kd*rdot (radial-velocity damping, the analogue of L1's Kv) -> stable.
+# Gains [rad/m] ported from the sim (R=90); STARTING POINTS, re-tune on SITL.
+PI_KP   = 0.020   # [rad/m]
+PI_KI   = 0.003   # [rad/(m·s)]
+PI_FF   = True    # centripetal steady-state bank feed-forward
+
+PID_KP  = 0.025   # [rad/m]
+PID_KI  = 0.000   # [rad/(m·s)]  (Ki=0: centripetal FF handles the SS offset)
+PID_KD  = 0.100   # [rad/(m/s)]  radial-velocity damping
+PID_FF  = True
 
 # Command shaping (outside MPC, applied to roll command before RC)
 # SLEW_BANK_DPS    = 80.0      # [deg/s] external slew (driver level)
@@ -237,12 +276,17 @@ class Shared:
         self.stop = threading.Event()
 
         self.lat_mode = LATERAL_MODE
+        self.tx_enable = True       # when False, att_sender RELEASES RC override
+                                    # (so e.g. RTL flies un-fought). Used by automation.
         self.hybrid_phase = "CAPTURE_L1"; self._blend_raw = 0.0; self.blend = 0.0
         self.uL1_last = 0.0; self.uMPC_last = 0.0
+        self.uPI_last = 0.0; self.uPID_last = 0.0
 
         self.mu_ff_sign = None
 
         self._mpc = None; self._path = None; self._l1 = None
+        self._pi = None; self._pid = None
+        self._ok_cnt = 0
         self.hz_rx = 0.0; self.hz_ctl = 0.0; self.hz_tx = 0.0
 
         self.qp_status=""; self.qp_iter=0; self.qp_fallback=False
@@ -328,6 +372,9 @@ def ctl_worker(m: mavutil.mavfile, S: Shared):
     path = CirclePath(LOITER_C, LOITER_R, cw=LOITER_CW)
     l1_dir = (-1 if LOITER_CW else +1)
     l1 = L1Loiter(L1_PERIOD, L1_DAMPING, BANK_LIMIT_DEG, l1_dir)
+    pi  = PILoiter(PI_KP, PI_KI, BANK_LIMIT_DEG, l1_dir, Ts, use_centripetal_ff=PI_FF)
+    pid = PIDLoiter(PID_KP, PID_KI, PID_KD, BANK_LIMIT_DEG, l1_dir, Ts,
+                    use_centripetal_ff=PID_FF)
 
     W = MPCWeights(MPC_W_ET, MPC_W_ECHI, MPC_W_MU, MPC_W_U, MPC_W_ET_T, MPC_W_ECHI_T)
     mpc = LTVMPC_OSQP(
@@ -340,7 +387,7 @@ def ctl_worker(m: mavutil.mavfile, S: Shared):
         use_w_du_scaling=MPC_USE_W_DU_SCALING
     )
 
-    S._mpc = mpc; S._path = path; S._l1 = l1
+    S._mpc = mpc; S._path = path; S._l1 = l1; S._pi = pi; S._pid = pid
     S.hybrid_phase = "CAPTURE_L1"; S._blend_raw=0.0; S.blend=0.0
 
     u_prev=0.0; phi_prev=0.0
@@ -424,6 +471,11 @@ def ctl_worker(m: mavutil.mavfile, S: Shared):
         xL1 = np.array([st.N, st.E, st.psi, u_prev, 0.0, Vg, 0.5], float)
         uL1 = l1.command(xL1, path, Va_for_ctrl=Vg, wind=wind_NE)
 
+        # PI / PID share the L1 7-state vector. Computed every loop (like uL1/uMPC)
+        # so they are always logged; only the selected one is sent to the FC.
+        uPI  = pi.command(xL1, path, Va_for_ctrl=Vg, wind=wind_NE)
+        uPID = pid.command(xL1, path, Va_for_ctrl=Vg, wind=wind_NE)
+
         xM  = np.array([st.N, st.E, st.psi, u_prev], float)  # state tetap u_prev
         try:
             uMPC, info = mpc.step(
@@ -443,6 +495,10 @@ def ctl_worker(m: mavutil.mavfile, S: Shared):
         # === Select mixing ===
         if S.lat_mode == "l1":
             mu_raw = uL1; S.hybrid_phase="L1_ONLY"; S.blend=0.0
+        elif S.lat_mode == "pi":
+            mu_raw = uPI; S.hybrid_phase="PI_ONLY"; S.blend=0.0
+        elif S.lat_mode == "pid":
+            mu_raw = uPID; S.hybrid_phase="PID_ONLY"; S.blend=0.0
         elif S.lat_mode == "mpc":
             mu_raw = uMPC; S.hybrid_phase="MPC_ONLY"; S.blend=1.0
             if ASSIST_IN_MPC:
@@ -471,7 +527,7 @@ def ctl_worker(m: mavutil.mavfile, S: Shared):
             s = _smoothstep(S._blend_raw); S.blend=s
             mu_raw = (1.0 - s)*uL1 + s*uMPC
 
-        S.uL1_last=uL1; S.uMPC_last=uMPC
+        S.uL1_last=uL1; S.uMPC_last=uMPC; S.uPI_last=uPI; S.uPID_last=uPID
 
         # langsung pakai hasil mixing (limit sudah dijaga QP & L1)
         mu_cmd = float(mu_raw)
@@ -505,17 +561,34 @@ def att_sender(m: mavutil.mavfile, S: Shared, hz: float=TX_HZ):
         with S.state_lock: st = NavState(**vars(S.state))
         if (time.monotonic()-st.ts) > STALE_TIMEOUT: continue
 
-        # mapping linear dari BANK_LIMIT_DEG → MANUAL_CONTROL (-1000..1000)
-        # Ini dianggap valid pilot input oleh PX4 (lebih reliable dibanding RC override)
-        roll_val = roll_deg_to_manual_y(math.degrees(roll_cmd))
-        m.mav.manual_control_send(
-            m.target_system,
-            0,          # x (pitch)
-            roll_val,   # y (roll)
-            500,        # z (throttle, 0–1000)
-            0,          # r (yaw)
-            0           # buttons
-        )
+        tx_on = getattr(S, "tx_enable", True)
+        if AUTOPILOT_TYPE == "ardupilot":
+            # ArduPilot Plane FBWB: inject roll via RC override on CH1 only.
+            # Altitude/airspeed stay with TECS. Other channels = 0 (release to RC)
+            # so we touch nothing but roll.
+            # When tx disabled, send CH1=0 too -> RELEASES the override so the FC
+            # (e.g. during RTL) is not fought by a latched roll command.
+            # NOTE: if roll tracks the WRONG way on SITL, the RC1 sense is reversed —
+            # negate inside roll_deg_to_pwm_linear, or set RC1_REVERSED on the FC.
+            pwm1 = roll_deg_to_pwm_linear(math.degrees(roll_cmd)) if tx_on else 0
+            m.mav.rc_channels_override_send(
+                m.target_system, m.target_component,
+                pwm1, 0, 0, 0, 0, 0, 0, 0
+            )
+        else:
+            # PX4: MANUAL_CONTROL is treated as valid pilot input.
+            if not tx_on:
+                continue
+            # mapping linear dari BANK_LIMIT_DEG → MANUAL_CONTROL (-1000..1000)
+            roll_val = roll_deg_to_manual_y(math.degrees(roll_cmd))
+            m.mav.manual_control_send(
+                m.target_system,
+                0,          # x (pitch)
+                roll_val,   # y (roll)
+                500,        # z (throttle, 0–1000)
+                0,          # r (yaw)
+                0           # buttons
+            )
         if (time.monotonic()-t0)>=1.0:
             S.hz_tx = cnt / (time.monotonic()-t0); t0=time.monotonic(); cnt=0
 
@@ -529,7 +602,7 @@ def logger_thread(S: Shared, csv_path: str=CSV_PATH):
         "roll_deg","pitch_deg","yaw_deg","psi_deg",
         "cog_deg","alt","vz","thr",
         "rho","rerr","echi_deg",
-        "cmd_roll_deg","uL1_deg","uMPC_deg",
+        "cmd_roll_deg","uL1_deg","uMPC_deg","uPI_deg","uPID_deg",
         "qp_status","qp_iter","qp_fallback",
         "exec_time_ms","jitter_ms","cpu_percent","mav_rx_latency_ms",
     ]
@@ -551,7 +624,7 @@ def logger_thread(S: Shared, csv_path: str=CSV_PATH):
                 f"{math.degrees(st.roll):.2f}", f"{math.degrees(st.pitch):.2f}", f"{math.degrees(st.yaw):.2f}", f"{math.degrees(st.psi):.2f}",
                 f"{st.cog_deg if st.cog_deg is not None else ''}", f"{st.alt:.1f}", f"{st.vz:.2f}", f"{st.throttle:.2f}",
                 f"{S.rho:.2f}", f"{S.rerr:.2f}", f"{S.echi_deg:.1f}",
-                f"{math.degrees(cmd_roll):.2f}", f"{math.degrees(S.uL1_last):.2f}", f"{math.degrees(S.uMPC_last):.2f}",
+                f"{math.degrees(cmd_roll):.2f}", f"{math.degrees(S.uL1_last):.2f}", f"{math.degrees(S.uMPC_last):.2f}", f"{math.degrees(S.uPI_last):.2f}", f"{math.degrees(S.uPID_last):.2f}",
                 S.qp_status, S.qp_iter, S.qp_fallback,
                 f"{S.exec_time_ctl*1000:.2f}", f"{S.jitter_ctl*1000:.2f}", f"{cpu:.1f}", f"{S.mav_rx_latency*1000:.2f}",
             ]
