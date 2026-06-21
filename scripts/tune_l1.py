@@ -15,13 +15,10 @@ from mpc_nav.wind import wind_at
 from mpc_nav.dynamics import rk4_step_long
 from mpc_nav.lateral_lqr import LateralLQR
 from mpc_nav.l1_loiter import L1Loiter
+from mpc_nav.stats import rms as _rms
 
 # Suppress log-directory creation side-effect from io_utils
 config.make_animation = False
-
-
-def _rms(a: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(a ** 2)))
 
 
 def _settle(e: np.ndarray, tol: float = 5.0) -> float:

@@ -7,10 +7,7 @@ import pandas as pd
 from . import config
 from .geometry import CirclePath, crosstrack_series
 from .io_utils import savepath
-
-
-def _rms(a: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(a ** 2)))
+from .stats import rms as _rms
 
 
 def _iae(et: np.ndarray) -> float:

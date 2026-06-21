@@ -40,6 +40,7 @@ matplotlib.use("Agg")              # headless: render straight to PNG
 import matplotlib.pyplot as plt
 
 from hardware import mavlink_driver as d   # connection, threads, Shared, constants
+from mpc_nav.stats import rms as _rms
 
 # ====================== EVALUATION PARAMETERS (EDIT HERE) ==============
 MODES             = ["l1", "pid", "mpc", "blend"]  # controllers to test, in order
@@ -234,10 +235,6 @@ def last_circle_mask(rec: dict) -> np.ndarray:
     phi_end = phi[-1]
     span = 2.0 * math.pi * PLOT_LAST_CIRCLES
     return phi >= max(0.0, phi_end - span)
-
-
-def _rms(a: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(a ** 2))) if len(a) else float("nan")
 
 
 def metrics(rec: dict, mask: np.ndarray, complete: bool) -> dict:
