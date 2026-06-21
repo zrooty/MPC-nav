@@ -1,6 +1,6 @@
 # SITL Test Protocol — Lateral Loiter Controllers (ArduPilot Plane)
 
-How to test the `mavlink_driver.py` controllers on ArduPilot SITL **one at a
+How to test the `hardware/mavlink_driver.py` controllers on ArduPilot SITL **one at a
 time**, fairly and reproducibly. The sim runs 4 controllers in parallel on
 identical plants; SITL can only run **one controller per flight**, so a
 standardised scenario is what makes runs comparable.
@@ -8,7 +8,7 @@ standardised scenario is what makes runs comparable.
 ## 0. Why the sim tuning is only a starting point
 
 The driver's operating point differs from the sim, and the plant is the real
-autopilot (not the sim's LQR inner loop). See [.docs/mpc_retune_va21.md](mpc_retune_va21.md)
+autopilot (not the sim's LQR inner loop). See [docs/mpc_retune_va21.md](mpc_retune_va21.md)
 for the sim tuning. Key differences:
 
 | | Sim (`config.py`) | Driver (SITL) |
@@ -20,7 +20,7 @@ for the sim tuning. Key differences:
 | Plants | 4 in parallel | 1 per flight |
 
 The driver params (`L1_PERIOD`, `MPC_HORIZON`, `MPC_TAU_MU`, …) are **scaled
-starting points**, all editable at the top of `mavlink_driver.py`. Re-tune here.
+starting points**, all editable at the top of `hardware/mavlink_driver.py`. Re-tune here.
 
 ## 1. Launch SITL
 
