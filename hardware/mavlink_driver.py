@@ -14,7 +14,7 @@ import numpy as np
 from pymavlink import mavutil
 import psutil
 
-from mpc_nav.geometry import CirclePath
+from mpc_nav.geometry import CirclePath, wrap as _wrap, orbit_metrics
 from mpc_nav.l1_loiter import L1Loiter
 from mpc_nav.ltv_mpc import LTVMPC_OSQP, MPCWeights
 from mpc_nav.pi_loiter import PILoiter
@@ -146,8 +146,9 @@ RUN_TAG = _dt.datetime.now().strftime("logs/logs_run_%Y%m%d-%H%M%S")
 CSV_PATH = f"{RUN_TAG}/mavlink_driver_allparams_{RUN_TAG}.csv"
 
 # ======================= Helper functions ============================
+# ``_wrap`` and ``orbit_metrics`` are imported from mpc_nav.geometry (single
+# source of truth; identical to the previous local copies).
 BOOT_T0 = time.monotonic()
-def _wrap(a: float) -> float: return math.atan2(math.sin(a), math.cos(a))
 def _smoothstep(x: float) -> float:
     x = max(0.0, min(1.0, x)); return x*x*(3.0 - 2.0*x)
 
@@ -161,16 +162,6 @@ def euler_to_quaternion(roll, pitch, yaw):
         cr * sp * cy + sr * cp * sy,
         cr * cp * sy - sr * sp * cy
     ]
-
-def orbit_metrics(n, e, chi, C, R, ccw=True):
-    r = np.array([n, e]) - np.asarray(C, float)
-    rho = float(np.linalg.norm(r)) + 1e-9
-    theta = math.atan2(r[1], r[0])
-    s = +1.0 if ccw else -1.0
-    chi_tan = theta + s*(math.pi/2.0)
-    echi = _wrap(chi_tan - chi)
-    rerr = abs(rho - R)
-    return rho, rerr, chi_tan, echi
 
 def mu_ff_circle(Vg, R, ccw, rerr, echi, prev_sign=None):
     # bank orbit ideal + bias radial halus + histeresis tanda
