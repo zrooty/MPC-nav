@@ -94,5 +94,5 @@ if __name__ == "__main__":
     plt.tight_layout()
     out = pathlib.Path(__file__).parent / "lqr_roll_test.png"
     plt.savefig(out, dpi=120)
-    print(f"Plot saved → {out}")
+    print(f"Plot saved -> {out}")
     plt.show()
