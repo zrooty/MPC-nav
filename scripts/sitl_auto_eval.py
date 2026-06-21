@@ -27,7 +27,7 @@ Run from the repo root, with SITL up:
 import os, sys, math, time, csv, threading, datetime as _dt
 
 # Make the repo root importable when run as `python scripts/sitl_auto_eval.py`
-# (that puts scripts/ on sys.path, not the root where mavlink_driver.py lives).
+# (that puts scripts/ on sys.path, not the root where the hardware package lives).
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -39,7 +39,7 @@ import matplotlib
 matplotlib.use("Agg")              # headless: render straight to PNG
 import matplotlib.pyplot as plt
 
-import mavlink_driver as d         # connection, threads, Shared, constants
+from hardware import mavlink_driver as d   # connection, threads, Shared, constants
 
 # ====================== EVALUATION PARAMETERS (EDIT HERE) ==============
 MODES             = ["l1", "pid", "mpc", "blend"]  # controllers to test, in order
