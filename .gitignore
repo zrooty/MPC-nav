@@ -8,3 +8,6 @@ gh_2.92.0_linux_amd64.tar.gz
 
 # Reference PDFs (kept locally under docs/refs, too large for git)
 *.pdf
+
+# Generated diagnostic plot from scripts/lqr_roll_step.py
+/scripts/lqr_roll_step.png

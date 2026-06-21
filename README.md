@@ -32,8 +32,7 @@ python -c "import mpc_nav.config as c; c.make_animation=False; import mpc_nav.ma
 |---|---|
 | [mpc_nav/](mpc_nav/) | Core simulation library (controllers, plant, metrics, plotting) |
 | [hardware/](hardware/) | MAVLink/SITL driver (`mavlink_driver.py`) and `rtl_monitor.py` |
-| [scripts/](scripts/) | Tools: `sitl_auto_eval.py`, `tune_l1.py`, `plot_mavlog.py` |
-| [tests/](tests/) | `test_lqr_roll.py` (roll inner-loop step response) |
+| [scripts/](scripts/) | Tools/diagnostics: `sitl_auto_eval.py`, `tune_l1.py`, `plot_mavlog.py`, `lqr_roll_step.py` |
 | [docs/](docs/) | Design/tuning notes; `docs/refs/` reference PDFs |
 | [legacy/](legacy/) | Archived monolithic versions — do not edit |
 

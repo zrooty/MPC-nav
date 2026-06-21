@@ -1,9 +1,9 @@
 """
-Roll stabiliser test: step 0 -> 25 deg.
+Roll stabiliser diagnostic: step 0 -> 25 deg.
 Plot bank angle and roll rate only.
 
 Usage:
-    python3 tests/test_lqr_roll.py
+    python scripts/lqr_roll_step.py
 """
 import sys
 import pathlib
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     ax2.grid(True)
 
     plt.tight_layout()
-    out = pathlib.Path(__file__).parent / "lqr_roll_test.png"
+    out = pathlib.Path(__file__).parent / "lqr_roll_step.png"
     plt.savefig(out, dpi=120)
     print(f"Plot saved -> {out}")
     plt.show()

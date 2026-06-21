@@ -44,7 +44,7 @@ Dependencies: see [requirements.txt](requirements.txt) / [pyproject.toml](pyproj
 (`numpy scipy osqp matplotlib pandas`; `pymavlink psutil` only for the
 [hardware/](hardware/) SITL driver, not the sim package).
 
-Roll inner-loop sanity test: `python tests/test_lqr_roll.py` (step bank response).
+Roll inner-loop sanity check: `python scripts/lqr_roll_step.py` (step bank response).
 
 ## Architecture (`mpc_nav/`)
 
@@ -101,9 +101,9 @@ CLI flags. Change behaviour there.
   metrics, plotting). Self-contained; this is what you usually edit.
 - [hardware/](hardware/) — MAVLink/SITL interface: `mavlink_driver.py` (lateral
   guidance driver, reuses `mpc_nav` controllers) and `rtl_monitor.py`.
-- [scripts/](scripts/) — runnable tools: `sitl_auto_eval.py` (SITL evaluation,
-  imports `hardware.mavlink_driver`), `tune_l1.py`, `plot_mavlog.py`.
-- [tests/](tests/) — `test_lqr_roll.py`.
+- [scripts/](scripts/) — runnable tools/diagnostics: `sitl_auto_eval.py` (SITL
+  evaluation, imports `hardware.mavlink_driver`), `tune_l1.py`, `plot_mavlog.py`,
+  `lqr_roll_step.py` (roll inner-loop step response).
 - [docs/](docs/) — design/tuning notes; `docs/refs/` holds reference PDFs (gitignored).
 - [legacy/](legacy/) — archived monolithic versions; do not edit.
 
