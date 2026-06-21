@@ -13,6 +13,11 @@ def _rms(a: np.ndarray) -> float:
     return float(np.sqrt(np.mean(a ** 2)))
 
 
+def _iae(et: np.ndarray) -> float:
+    """Integral of absolute error (sum |e| · Ts) [m·s]."""
+    return float(np.sum(np.abs(et)) * config.Ts)
+
+
 def _settle_time(e: np.ndarray, tol: float = 5.0) -> float:
     for i, v in enumerate(e):
         if abs(v) <= tol:
@@ -32,7 +37,7 @@ def _controller_row(et: np.ndarray, log: Dict[str, np.ndarray]) -> Dict[str, flo
     return {
         "RMS": _rms(et),
         "MAX": float(ae.max()),
-        "IAE": float(np.sum(ae) * config.Ts),
+        "IAE": _iae(et),
         "settle": _settle_time(et, 5.0),
         "trans": _rms(et[:n_trans]),
         "ss": float(np.mean(ae[-n_ss:])),
@@ -129,65 +134,34 @@ def prepare_metrics_and_save(path: CirclePath,
     et_PI = crosstrack_series(path, PIlog["n"], PIlog["e"])
     et_PID = crosstrack_series(path, PIDlog["n"], PIDlog["e"])
 
-    metrics = {
-        "RMS_e_t_L1": _rms(et_L1),
-        "RMS_e_t_MPC": _rms(et_M),
-        "RMS_e_t_PI": _rms(et_PI),
-        "RMS_e_t_PID": _rms(et_PID),
-        "settle_s_L1(|e_t|<5m)": _settle_time(et_L1, 5.0),
-        "settle_s_MPC(|e_t|<5m)": _settle_time(et_M, 5.0),
-        "settle_s_PI(|e_t|<5m)": _settle_time(et_PI, 5.0),
-        "settle_s_PID(|e_t|<5m)": _settle_time(et_PID, 5.0),
-        "RMS_bank_L1_deg": _rms(np.degrees(L1log["mu"])),
-        "RMS_bank_MPC_deg": _rms(np.degrees(MPClog["mu"])),
-        "RMS_bank_PI_deg": _rms(np.degrees(PIlog["mu"])),
-        "RMS_bank_PID_deg": _rms(np.degrees(PIDlog["mu"])),
-        "Mean_V_L1": float(np.mean(L1log["V"])),
-        "Mean_V_MPC": float(np.mean(MPClog["V"])),
-        "Mean_V_PI": float(np.mean(PIlog["V"])),
-        "Mean_V_PID": float(np.mean(PIDlog["V"])),
-    }
+    # (name, crosstrack series, log) in the column order used by each export.
+    series = [("L1", et_L1, L1log), ("MPC", et_M, MPClog),
+              ("PI", et_PI, PIlog), ("PID", et_PID, PIDlog)]
+    # et_series / crosstrack CSVs historically lead with MPC.
+    series_mpc_first = [series[1], series[0], series[2], series[3]]
+
+    metrics: Dict[str, float] = {}
+    metrics.update({f"RMS_e_t_{n}": _rms(et) for n, et, _ in series})
+    metrics.update({f"settle_s_{n}(|e_t|<5m)": _settle_time(et, 5.0) for n, et, _ in series})
+    metrics.update({f"RMS_bank_{n}_deg": _rms(np.degrees(log["mu"])) for n, _, log in series})
+    metrics.update({f"Mean_V_{n}": float(np.mean(log["V"])) for n, _, log in series})
     pd.DataFrame([metrics]).to_csv(savepath("metrics_compare.csv"), index=False)
 
     t_arr = np.arange(len(MPClog["n"])) * config.Ts
-    pd.DataFrame({
-        "t_s": t_arr,
-        "e_t_MPC": et_M,
-        "e_t_L1": et_L1,
-        "e_t_PI": et_PI,
-        "e_t_PID": et_PID,
-        "V_MPC": MPClog["V"],
-        "V_L1": L1log["V"],
-        "V_PI": PIlog["V"],
-        "V_PID": PIDlog["V"],
-        "thr_MPC": MPClog["thr"],
-        "thr_L1": L1log["thr"],
-        "thr_PI": PIlog["thr"],
-        "thr_PID": PIDlog["thr"],
-        "p_MPC": MPClog["p"],
-        "p_L1": L1log["p"],
-        "p_PI": PIlog["p"],
-        "p_PID": PIDlog["p"],
-        "abs_e_t_MPC": np.abs(et_M),
-        "abs_e_t_L1": np.abs(et_L1),
-        "abs_e_t_PI": np.abs(et_PI),
-        "abs_e_t_PID": np.abs(et_PID),
-    }).to_csv(savepath("et_series.csv"), index=False)
+    cols: Dict[str, np.ndarray] = {"t_s": t_arr}
+    cols.update({f"e_t_{n}": et for n, et, _ in series_mpc_first})
+    cols.update({f"V_{n}": log["V"] for n, _, log in series_mpc_first})
+    cols.update({f"thr_{n}": log["thr"] for n, _, log in series_mpc_first})
+    cols.update({f"p_{n}": log["p"] for n, _, log in series_mpc_first})
+    cols.update({f"abs_e_t_{n}": np.abs(et) for n, et, _ in series_mpc_first})
+    pd.DataFrame(cols).to_csv(savepath("et_series.csv"), index=False)
 
-    pd.DataFrame([{
-        "RMS_e_t_MPC": _rms(et_M),
-        "IAE_e_t_MPC": float(np.sum(np.abs(et_M)) * config.Ts),
-        "MAX_e_t_MPC": float(np.max(np.abs(et_M))),
-        "RMS_e_t_L1": _rms(et_L1),
-        "IAE_e_t_L1": float(np.sum(np.abs(et_L1)) * config.Ts),
-        "MAX_e_t_L1": float(np.max(np.abs(et_L1))),
-        "RMS_e_t_PI": _rms(et_PI),
-        "IAE_e_t_PI": float(np.sum(np.abs(et_PI)) * config.Ts),
-        "MAX_e_t_PI": float(np.max(np.abs(et_PI))),
-        "RMS_e_t_PID": _rms(et_PID),
-        "IAE_e_t_PID": float(np.sum(np.abs(et_PID)) * config.Ts),
-        "MAX_e_t_PID": float(np.max(np.abs(et_PID))),
-    }]).to_csv(savepath("metrics_crosstrack.csv"), index=False)
+    cross: Dict[str, float] = {}
+    for n, et, _ in series_mpc_first:
+        cross[f"RMS_e_t_{n}"] = _rms(et)
+        cross[f"IAE_e_t_{n}"] = _iae(et)
+        cross[f"MAX_e_t_{n}"] = float(np.max(np.abs(et)))
+    pd.DataFrame([cross]).to_csv(savepath("metrics_crosstrack.csv"), index=False)
 
     # Human-readable markdown report (4-way, with best-per-metric highlighting)
     _write_md_report(
