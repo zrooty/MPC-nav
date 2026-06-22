@@ -55,7 +55,7 @@ LOITER_CW  = False           # True: clockwise
 # L1_dist=(1/pi)*zeta*T*Vg ~= 0.71*R. To preserve that lookahead/radius ratio at
 # R=180: T ~= 0.71*R*pi/(zeta*Vg) = 0.71*180*pi/(0.80*22) ~= 22 s. STARTING POINT
 # — re-tune on SITL (sweep T, watch rerr settling + bank-rate in the CSV log).
-L1_PERIOD   = 22.0          # [s]   (was 17.0; scaled to R=180)
+L1_PERIOD   = 13.0          # [s]   (was 17.0; scaled to R=180)
 L1_DAMPING  = 0.80          # [-]   (was 0.707; damping is dimensionless, transfers)
 BANK_LIMIT_DEG = 50.0       # [deg] bank limit seen by both L1 & MPC
 
@@ -65,19 +65,19 @@ MPC_TAU_MU          = 0.45    # [s] effective roll closed-loop time constant of 
                               # the #1 MPC-fidelity param on SITL: identify it by
                               # commanding a bank step in FBWB and fitting the roll
                               # response, then set tau here.
-MPC_HORIZON         = 50     # steps. At Ts=0.10 -> 5.0 s ~= 110 m ~= 0.6*R at R=180
+MPC_HORIZON         = 40     # steps. At Ts=0.10 -> 5.0 s ~= 110 m ~= 0.6*R at R=180
                              # (sim used N=40 @ Ts=0.1 = 4 s for R=90). Longer N =
                              # better capture but heavier QP; if exec_time_ms nears
                              # Ts*1000, reduce N. Re-tune on SITL.
 MPC_SLEW_DEG_S      = 9.0  # [deg/s] Δu/Δt limit inside MPC
 MPC_USE_GS_FOR_MUss = False   # centripetal bank uses groundspeed if True
-MPC_W_ET            = 1.0   # stage weight on cross-track radius error e_t
+MPC_W_ET            = 2.0   # stage weight on cross-track radius error e_t
 MPC_W_ECHI          = 1.0    # stage weight on heading-to-tangent error e_chi
 MPC_W_MU            = 10.0   # stage weight on actual mu (keep small)
 MPC_W_U             = 3.0    # stage weight on command u
 MPC_W_ET_T          = 2.0   # terminal weights...
 MPC_W_ECHI_T        = 1.0
-MPC_W_DU            = 100.0   # rate penalty on Δu (total variation)
+MPC_W_DU            = 200.0   # rate penalty on Δu (total variation)
 MPC_W_MU_TERM       = 1.0    # terminal penalty on (mu_N - mu_ss)^2
 MPC_VA_INIT         = 22.0   # [m/s] initial speed used for linearization
 MPC_VA_MIN_MAX      = (6.0, 30.0)
@@ -95,8 +95,8 @@ PI_KP   = 0.020   # [rad/m]
 PI_KI   = 0.003   # [rad/(m·s)]
 PI_FF   = True    # centripetal steady-state bank feed-forward
 
-PID_KP  = 0.025   # [rad/m]
-PID_KI  = 0.000   # [rad/(m·s)]  (Ki=0: centripetal FF handles the SS offset)
+PID_KP  = 0.030   # [rad/m]
+PID_KI  = 0.002   # [rad/(m·s)]  (Ki=0: centripetal FF handles the SS offset)
 PID_KD  = 0.100   # [rad/(m/s)]  radial-velocity damping
 PID_FF  = True
 
@@ -108,7 +108,7 @@ MAX_BANK_DEG     = BANK_LIMIT_DEG  # clamp for RC mapping
 USE_WIND_FEED = True         # feed (WIND) to L1 & MPC if available
 
 # Hybrid gating (only when LATERAL_MODE == "blend")
-BLEND_SECONDS    = 20.0
+BLEND_SECONDS    = 15.0
 R_ERR_ENTER_FRAC = 0.25
 HEAD_ALIGN_DEG   = 45.0
 HOLD_ENTER_STEPS = 8
@@ -127,7 +127,7 @@ L1_BIAS_GAIN = 0.15   # 0.05–0.2 aman
 
 # --- Zig-Zag Killer: MPC feedforward warm-start ---
 FF_ENABLE        = True      # aktif/nonaktifkan
-FF_ALPHA         = 0.25      # porsi feedforward ke u_prev_warm (0..1) 0.60
+FF_ALPHA         = 0.35      # porsi feedforward ke u_prev_warm (0..1) 0.60
 FF_R_BIAS        = 0.25      # bias radial untuk dorong kembali ke R 0.25
 FF_HYST_DEG      = 7.0       # histeresis tanda saat |eχ| kecil (deg) 8
 
@@ -564,7 +564,7 @@ def att_sender(m: mavutil.mavfile, S: Shared, hz: float=TX_HZ):
             pwm1 = roll_deg_to_pwm_linear(math.degrees(roll_cmd)) if tx_on else 0
             m.mav.rc_channels_override_send(
                 m.target_system, m.target_component,
-                pwm1, 0, 0, 0, 0, 0, 0, 0
+                pwm1, 1500, 1500, 1500, 0, 0, 0, 0
             )
         else:
             # PX4: MANUAL_CONTROL is treated as valid pilot input.

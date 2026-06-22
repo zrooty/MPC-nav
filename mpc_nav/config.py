@@ -34,8 +34,8 @@ aileron_limit_deg = 25.0
 
 # --------------- Wind model ------------------------------------------
 wind_mode      = "constant"   # "constant" | "rotating" | "gust" | "randomwalk" | "custom"
-wind_mean      = (6.0, 0.0)
-wind_max       = 6.0
+wind_mean      = (4.0, 0.0)
+wind_max       = 5.0
 
 wind_rot_deg_s = 2.0          # rotating mode: deg/s, +CCW
 
@@ -83,9 +83,9 @@ PI_centripetal_ff = True      # add atan(Vg²/(g·R)) steady-state bank feed-for
 # rdot = radial velocity (Ahat·v_g); the Kd term is the cross-track-rate
 # damping that the pure PI lacks (analogue of L1's Kv). This baseline holds
 # the circle. See .docs/pi_baseline_notes.md.
-PID_Kp            = 0.025     # [rad/m]       swept best: Kp=0.025, Kd=0.10, Ki=0.0
+PID_Kp            = 0.030     # [rad/m]       swept best: Kp=0.025, Kd=0.10, Ki=0.0
 PID_Kd            = 0.100     # [rad/(m/s)]  damping on radial velocity
-PID_Ki            = 0.000     # [rad/(m·s)]  Ki=0 wins: centripetal FF handles SS offset
+PID_Ki            = 0.001     # [rad/(m·s)]  Ki=0 wins: centripetal FF handles SS offset
 PID_centripetal_ff = True
 
 # --------------- LTV-MPC weights -------------------------------------

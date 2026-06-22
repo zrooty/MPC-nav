@@ -5,17 +5,17 @@
 Flies each lateral controller (L1 / PID / PI / MPC / blend) on the SAME airborne
 vehicle for a fixed number of full circles, records the trajectory, and emits:
 
-  * one cross-track-error plot per controller (last circle only),
-  * one Ref-vs-trajectory plot per controller (last circle only),
+  * one cross-track-error plot per controller (last PLOT_LAST_SAMPLES samples),
+  * one Ref-vs-trajectory plot per controller (last PLOT_LAST_SAMPLES samples),
   * a combined cross-track-error comparison plot,
   * a markdown report with a per-controller metrics table + embedded plots.
 
 It reuses mavlink_driver.py wholesale: the same MAVLink connection, state reader,
 control worker and RC-override sender. Controllers are switched LIVE by writing
 `Shared.lat_mode` (ctl_worker reads it every loop), so no restart is needed
-between runs. Because only the LAST circle is plotted/scored, each run's capture
-transient (and its different start point) is excluded — the comparison is a fair
-steady-state one.
+between runs. Because only the LAST PLOT_LAST_SAMPLES samples are plotted/scored,
+each run's capture transient (and its different start point) is excluded — the
+comparison is a fair steady-state one.
 
 PRECONDITION: the vehicle must already be AIRBORNE (e.g. take off in AUTO/TAKEOFF/
 FBWA and climb above MIN_AIRBORNE_ALT near the loiter centre). This script then
@@ -43,15 +43,16 @@ from hardware import mavlink_driver as d   # connection, threads, Shared, consta
 from mpc_nav.stats import rms as _rms
 
 # ====================== EVALUATION PARAMETERS (EDIT HERE) ==============
-MODES             = ["l1", "pid", "mpc", "blend"]  # controllers to test, in order
-N_CIRCLES         = 3          # full orbits to fly per controller
-PLOT_LAST_CIRCLES = 1.5        # how many trailing orbits to plot/score
-WIND_LABEL        = "windless" # shown in titles/report (set SIM_WIND_SPD=0 in SITL)
+MODES             = ["l1", "pid", "blend"]    # controllers to test, in order
+MODE_DISPLAY      = {"blend": "MPC"}          # display-name overrides for titles / legends
+N_CIRCLES         = 2          # full orbits to fly per controller
+PLOT_LAST_SAMPLES = 1500       # how many trailing samples to plot/score (last N data points)
+WIND_LABEL        = "wind: 3 m/s" # shown in titles/report (set SIM_WIND_SPD=0 in SITL)
 
 SAMPLE_HZ         = 20.0       # trajectory recording rate [Hz]
 
 # Each run is preceded by RTL so every controller starts from the SAME base state.
-RTL_SETTLE_S      = 30.0       # seconds in RTL between runs (roll override released)
+RTL_SETTLE_S      = 5.0       # seconds in RTL between runs (roll override released)
 
 # Capture gating: start counting circles only once the vehicle is ON the orbit.
 CAPTURE_TOL_FRAC  = 0.05       # |rho-R| < 5% R counts as "captured"
@@ -80,6 +81,10 @@ CSV_FIELDS = [
 
 
 # ====================== Helpers =======================================
+def _disp(mode: str) -> str:
+    return MODE_DISPLAY.get(mode, mode.upper())
+
+
 def wait_airborne(S: "d.Shared") -> None:
     print(f"[EVAL] Waiting for airborne (alt > {MIN_AIRBORNE_ALT:.0f} m) + fresh state ...")
     while True:
@@ -131,6 +136,7 @@ def reset_controllers(S: "d.Shared") -> None:
 
 def fly_and_record(S: "d.Shared", mode: str, path) -> dict:
     """Switch to `mode`, wait for capture, then record N_CIRCLES orbits."""
+    os.makedirs(RUN_DIR, exist_ok=True)
     Cn, Ce = path.C            # circle centre (North, East)
     R = float(path.R)
     cap_tol = CAPTURE_TOL_FRAC * R
@@ -229,12 +235,12 @@ def fly_and_record(S: "d.Shared", mode: str, path) -> dict:
 
 
 def last_circle_mask(rec: dict) -> np.ndarray:
-    phi = rec["phi"]
-    if len(phi) == 0:
-        return np.zeros(0, dtype=bool)
-    phi_end = phi[-1]
-    span = 2.0 * math.pi * PLOT_LAST_CIRCLES
-    return phi >= max(0.0, phi_end - span)
+    """Boolean mask selecting the last PLOT_LAST_SAMPLES recorded data points."""
+    n = len(rec["t"])
+    mask = np.zeros(n, dtype=bool)
+    if n:
+        mask[-PLOT_LAST_SAMPLES:] = True
+    return mask
 
 
 def metrics(rec: dict, mask: np.ndarray, complete: bool) -> dict:
@@ -265,8 +271,9 @@ def metrics(rec: dict, mask: np.ndarray, complete: bool) -> dict:
 def plot_crosstrack(mode: str, rec: dict, mask: np.ndarray, out: str) -> None:
     ae = rec["abs_err"][mask]
     fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(np.arange(1, len(ae) + 1), ae, color="#3a6ea5", lw=1.6, label="Cross-track error")
-    ax.set_title(f"{mode.upper()} crosstrack error {WIND_LABEL}")
+    ax.plot(np.arange(1, len(ae) + 1), ae, color="#3a6ea5", lw=1.6,
+            marker="s", markersize=4, markevery=50, label="Cross-track error")
+    ax.set_title(f"{_disp(mode)} crosstrack error ({WIND_LABEL})")
     ax.set_xlabel("t"); ax.set_ylabel("m")
     ax.grid(True, axis="y", alpha=0.4)
     ax.margins(x=0)
@@ -286,9 +293,10 @@ def plot_trajectory(mode: str, rec: dict, mask: np.ndarray, path, out: str) -> N
     traj_y = rec["N"][mask]
 
     fig, ax = plt.subplots(figsize=(7.5, 7.5))
-    ax.plot(ref_x, ref_y, color="#c0392b", lw=1.6, label="Ref")
-    ax.plot(traj_x, traj_y, color="#3a6ea5", lw=1.8, label="Trajectory")
-    ax.set_title(f"{mode.upper()} - Trajectory")
+    ax.plot(ref_x, ref_y, color="#c0392b", lw=1.6, linestyle="--", label="Ref")
+    ax.plot(traj_x, traj_y, color="#3a6ea5", lw=1.8,
+            marker="s", markersize=4, markevery=20, label="Trajectory")
+    ax.set_title(f"{_disp(mode)} - Trajectory ({WIND_LABEL})")
     ax.set_xlabel("m"); ax.set_ylabel("m")
     ax.set_aspect("equal", adjustable="datalim")
     ax.grid(True, alpha=0.4)
@@ -299,14 +307,18 @@ def plot_trajectory(mode: str, rec: dict, mask: np.ndarray, path, out: str) -> N
 
 
 def plot_compare(results: dict, masks: dict, out: str) -> None:
+    _MARKERS = ["s", "o", "^", "D"]
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    for mode in results:
+    for i, mode in enumerate(results):
+        t = results[mode]["t"][masks[mode]]
         ae = results[mode]["abs_err"][masks[mode]]
-        ax.plot(np.arange(1, len(ae) + 1), ae, lw=1.4, label=mode.upper())
-    ax.set_title(f"Cross-track error comparison — last {PLOT_LAST_CIRCLES} circle(s) ({WIND_LABEL})")
-    ax.set_xlabel(f"sample (last {PLOT_LAST_CIRCLES} circle(s))"); ax.set_ylabel("abs cross-track error [m]")
+        ax.plot(t, ae, lw=1.4,
+                marker=_MARKERS[i % len(_MARKERS)], markersize=4, markevery=50,
+                label=_disp(mode))
+    ax.set_title(f"Cross-track error comparison ({WIND_LABEL})")
+    ax.set_xlabel("Time [s]"); ax.set_ylabel("abs cross-track error [m]")
     ax.grid(True, alpha=0.4); ax.margins(x=0)
-    ax.legend(loc="upper right", ncol=len(results), frameon=False)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=len(results), frameon=False)
     fig.tight_layout()
     fig.savefig(out, dpi=110, bbox_inches="tight")
     plt.close(fig)
@@ -324,19 +336,19 @@ def write_report(results: dict, masks: dict, mets: dict, path) -> str:
     md.append(f"| Direction | {'CW' if d.LOITER_CW else 'CCW'} |")
     md.append(f"| Wind | {WIND_LABEL} |")
     md.append(f"| Circles flown / controller | {N_CIRCLES} |")
-    md.append(f"| Plotted / scored | last {PLOT_LAST_CIRCLES} circle(s) |")
+    md.append(f"| Plotted / scored | last {PLOT_LAST_SAMPLES} samples |")
     md.append(f"| RTL settle between runs | {RTL_SETTLE_S:.0f} s |")
     md.append(f"| Autopilot | {d.AUTOPILOT_TYPE} (FBWB + RC1 override) |\n")
 
     # metrics table (best stable value per row in bold; divergent runs excluded)
-    md.append(f"**Metrics over the last {PLOT_LAST_CIRCLES} circle(s)** (lower is better)\n")
+    md.append(f"**Metrics over the last {PLOT_LAST_SAMPLES} samples** (lower is better)\n")
     names = list(results.keys())
     keys = [("rms", "RMS abs e_t [m]"), ("max", "Peak abs e_t [m]"),
             ("mean", "Mean abs e_t [m]"), ("iae", "IAE [m·s]"),
             ("bank_rate_rms", "Bank-rate RMS [deg/s]"),
             ("circle_period_s", "Circle period [s]")]
     stable = [n for n in names if mets[n]["complete"] and mets[n]["rms"] < 0.5 * R]
-    md.append("| Metric | " + " | ".join(x.upper() for x in names) + " |")
+    md.append("| Metric | " + " | ".join(_disp(x) for x in names) + " |")
     md.append("|" + "---|" * (len(names) + 1))
     for key, label in keys:
         best = min((mets[n][key] for n in stable if mets[n][key] == mets[n][key]),
@@ -355,7 +367,7 @@ def write_report(results: dict, masks: dict, mets: dict, path) -> str:
     incomplete = [n for n in names if not mets[n]["complete"]]
     if incomplete:
         md.append("> ⚠️ Did not complete " + f"{N_CIRCLES} circles within the time cap: "
-                  + ", ".join(x.upper() for x in incomplete)
+                  + ", ".join(_disp(x) for x in incomplete)
                   + " — diverged or failed to capture within the cap.\n")
 
     md.append("**Legend** — abs cross-track error = `|rho - R|`. IAE is the "
@@ -364,7 +376,7 @@ def write_report(results: dict, masks: dict, mets: dict, path) -> str:
 
     # per-controller plots
     for mode in results:
-        md.append(f"## {mode.upper()}\n")
+        md.append(f"## {_disp(mode)}\n")
         m = mets[mode]
         md.append(f"RMS `{m['rms']:.3f}` m · peak `{m['max']:.3f}` m · "
                   f"IAE `{m['iae']:.3f}` m·s · "
@@ -387,7 +399,7 @@ def write_report(results: dict, masks: dict, mets: dict, path) -> str:
 def main():
     os.makedirs(RUN_DIR, exist_ok=True)
     print(f"[EVAL] Output dir: {RUN_DIR}")
-    print(f"[EVAL] Modes: {MODES}  | {N_CIRCLES} circles each, plotting last {PLOT_LAST_CIRCLES}")
+    print(f"[EVAL] Modes: {MODES}  | {N_CIRCLES} circles each, plotting last {PLOT_LAST_SAMPLES} samples")
 
     m = d.connect_mavlink(d.MAVLINK_URL)
     S = d.Shared()

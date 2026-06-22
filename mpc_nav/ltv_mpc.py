@@ -322,64 +322,88 @@ class LTVMPC_OSQP:
                            Aks, Bks) -> Tuple[sp.csc_matrix, np.ndarray, np.ndarray]:
         N, nx, nu = self.N, self.nx, self.nu
         nzx = (N + 1) * nx
-        nzu = N * nu
-        nz = nzx + nzu
+        nz  = nzx + N * nu
 
-        def sx(k): return slice(k * nx, (k + 1) * nx)
-        def su(k): return slice(nzx + k * nu, nzx + (k + 1) * nu)
+        # Constraint row counts: initial + dynamics + bank_limits + input_limits + slew
+        n_rows = nx + N * nx + (N + 1) + N + N
+        l_vec  = np.empty(n_rows)
+        u_vec  = np.empty(n_rows)
 
-        rows, l, u = [], [], []
+        # Pre-allocate COO arrays (upper bound on nnz)
+        max_nnz = nx + N * (nx + nx * nx + nx) + (N + 1) + N + (1 + (N - 1) * 2)
+        ri = np.empty(max_nnz, dtype=np.int32)
+        ci = np.empty(max_nnz, dtype=np.int32)
+        vd = np.empty(max_nnz, dtype=float)
+        ptr = 0  # COO fill pointer
 
-        # Initial δx_0 = 0
-        A0 = sp.lil_matrix((nx, nz))
-        A0[:, sx(0)] = sp.eye(nx)
-        rows.append(A0)
-        l.extend(np.zeros(nx))
-        u.extend(np.zeros(nx))
+        r = 0  # current constraint row
 
-        # Dynamics: δx_{k+1} = A_k δx_k + B_k δu_k
+        # --- Initial: δx_0 = 0 ---
+        ri[ptr:ptr+nx] = np.arange(nx); ci[ptr:ptr+nx] = np.arange(nx); vd[ptr:ptr+nx] = 1.0
+        ptr += nx
+        l_vec[r:r+nx] = 0.0; u_vec[r:r+nx] = 0.0
+        r += nx
+
+        # --- Dynamics: δx_{k+1} = Ak δx_k + Bk δu_k (vectorised over k) ---
+        Aks_arr = np.array(Aks)  # (N, nx, nx)
+        Bks_arr = np.array(Bks).reshape(N, nx)  # (N, nx)
+
+        # Identity block for δx_{k+1}: nx entries per step
         for k in range(N):
-            Am = sp.lil_matrix((nx, nz))
-            Am[:, sx(k + 1)] = sp.eye(nx)
-            Am[:, sx(k)] = -Aks[k]
-            Am[:, su(k)] = -Bks[k]
-            rows.append(Am)
-            l.extend(np.zeros(nx))
-            u.extend(np.zeros(nx))
+            base_r = r + k * nx
+            base_c = (k + 1) * nx
+            ri[ptr:ptr+nx] = np.arange(base_r, base_r + nx)
+            ci[ptr:ptr+nx] = np.arange(base_c, base_c + nx)
+            vd[ptr:ptr+nx] = 1.0
+            ptr += nx
 
-        # |mu_actual_k| ≤ mu_max
+        # -Ak blocks: nx*nx entries per step (full; Ak is always dense for this model)
+        row_base = r + np.repeat(np.arange(N) * nx, nx * nx) + np.tile(np.arange(nx).repeat(nx), N)
+        col_base = np.tile(np.arange(nx * nx) % nx, N) + np.repeat(np.arange(N) * nx, nx * nx)
+        n_Ak = N * nx * nx
+        ri[ptr:ptr+n_Ak] = row_base
+        ci[ptr:ptr+n_Ak] = col_base
+        vd[ptr:ptr+n_Ak] = -Aks_arr.reshape(-1)
+        ptr += n_Ak
+
+        # -Bk columns: nx entries per step
+        for k in range(N):
+            base_r = r + k * nx
+            ri[ptr:ptr+nx] = np.arange(base_r, base_r + nx)
+            ci[ptr:ptr+nx] = nzx + k * nu
+            vd[ptr:ptr+nx] = -Bks_arr[k]
+            ptr += nx
+
+        l_vec[r:r+N*nx] = 0.0; u_vec[r:r+N*nx] = 0.0
+        r += N * nx
+
+        # --- Bank limits: E_mu δx_k ---
+        mu_col = 3
         for k in range(N + 1):
-            Em = sp.lil_matrix((1, nz))
-            Em[0, sx(k)] = self.E_mu
-            mu_nom = x_nom[k, 3]
-            rows.append(Em)
-            l.append(-self.mu_max - mu_nom)
-            u.append(self.mu_max - mu_nom)
+            ri[ptr] = r; ci[ptr] = k * nx + mu_col; vd[ptr] = 1.0; ptr += 1
+            l_vec[r] = -self.mu_max - x_nom[k, 3]
+            u_vec[r] =  self.mu_max - x_nom[k, 3]
+            r += 1
 
-        # |u_nom + δu_k| ≤ mu_max
+        # --- Input limits: δu_k ---
         for k in range(N):
-            Um = sp.lil_matrix((1, nz))
-            Um[0, su(k)] = 1.0
-            rows.append(Um)
-            l.append(-self.mu_max - u_prev)
-            u.append(self.mu_max - u_prev)
+            ri[ptr] = r; ci[ptr] = nzx + k * nu; vd[ptr] = 1.0; ptr += 1
+            l_vec[r] = -self.mu_max - u_prev
+            u_vec[r] =  self.mu_max - u_prev
+            r += 1
 
-        # Slew: |δu_k - δu_{k-1}| ≤ du_max  (δu_{-1} := 0)
-        Sm = sp.lil_matrix((1, nz))
-        Sm[0, su(0)] = 1.0
-        rows.append(Sm)
-        l.append(-self.du_max)
-        u.append(self.du_max)
+        # --- Slew ---
+        ri[ptr] = r; ci[ptr] = nzx; vd[ptr] = 1.0; ptr += 1
+        l_vec[r] = -self.du_max; u_vec[r] = self.du_max
+        r += 1
         for k in range(1, N):
-            Sm = sp.lil_matrix((1, nz))
-            Sm[0, su(k)] = 1.0
-            Sm[0, su(k - 1)] = -1.0
-            rows.append(Sm)
-            l.append(-self.du_max)
-            u.append(self.du_max)
+            ri[ptr] = r; ci[ptr] = nzx + k * nu;       vd[ptr] =  1.0; ptr += 1
+            ri[ptr] = r; ci[ptr] = nzx + (k-1) * nu;   vd[ptr] = -1.0; ptr += 1
+            l_vec[r] = -self.du_max; u_vec[r] = self.du_max
+            r += 1
 
-        A_full = sp.vstack(rows, format="csc")
-        return A_full, np.array(l, dtype=float), np.array(u, dtype=float)
+        A_full = sp.csc_matrix((vd[:ptr], (ri[:ptr], ci[:ptr])), shape=(n_rows, nz))
+        return A_full, l_vec, u_vec
 
     def _solve_qp(self, P_num: np.ndarray, q: np.ndarray,
                   A_full: sp.csc_matrix, l_vec: np.ndarray, u_vec: np.ndarray,
@@ -405,7 +429,7 @@ class LTVMPC_OSQP:
             self._prob = osqp.OSQP()
             self._prob.setup(P=self._P, q=q, A=self._A, l=l_vec, u=u_vec,
                              verbose=False, eps_abs=1e-4, eps_rel=1e-4,
-                             polish=True, max_iter=20000, adaptive_rho=True)
+                             polish=False, max_iter=4000, adaptive_rho=True)
             self._try_warm_start()
         else:
             P_data = self._gather_data_from_dense(P_num, self._P_tpl)
